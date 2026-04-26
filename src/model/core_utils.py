@@ -8,13 +8,15 @@ from torchvision import datasets
 from torch.utils.data import DataLoader, Subset, ConcatDataset
 from sklearn.model_selection import train_test_split
 import matplotlib
-matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
 import math
 
+
+
+matplotlib.use('Agg')
 
 
 def get_food101_loaders(data_dir, batch_size, image_size):
@@ -203,7 +205,7 @@ def run_inference(model, dataloader, criterion, device, use_amp, amp_dtype, desc
         images = images.to(device, non_blocking=True)
 
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
-            reconstructed, _, _ = model(images)
+            reconstructed = model(images)
             loss = criterion(reconstructed, images)
             if not torch.isfinite(loss):
                 is_valid = False
@@ -288,7 +290,7 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
         images = images.to(device, non_blocking=True)
 
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
-            reconstructed, _, rvq_info = model(images)
+            reconstructed = model(images)
 
         origs_01 = (images * 0.5 + 0.5).clamp(0, 1).float()
         recons_01 = (reconstructed * 0.5 + 0.5).clamp(0, 1).float()
@@ -305,25 +307,6 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
         fid_metric.update(origs_01, real=True)
         fid_metric.update(recons_01, real=False)
 
-        # Accumulation rigoureuse RVQ
-        if 'metrics' in rvq_info:
-            for k, v in rvq_info['metrics'].items():
-                tot_rvq_losses[k] += v
-
-        if 'indices' in rvq_info:
-            indices = rvq_info['indices'] # Forme attendue : (B, num_quantizers, H, W)
-            num_quantizers = indices.shape[1]
-
-            # Initialisation de la matrice des comptes (sur GPU pour la vitesse, en float64 pour éviter l'overflow)
-            if global_bincounts is None:
-                global_bincounts = torch.zeros((num_quantizers, codebook_size), dtype=torch.float64, device=device)
-
-            # Accumulation des occurrences niveau par niveau
-            for q in range(num_quantizers):
-                flat_idx = indices[:, q, :, :].reshape(-1)
-                batch_bincount = torch.bincount(flat_idx, minlength=codebook_size).to(torch.float64)
-                global_bincounts[q] += batch_bincount
-
         count += 1
         if len(sample_originals) == 0:
             sample_originals = images[:8].cpu()
@@ -339,59 +322,7 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
         "fid": fid_metric.compute().item()
     }
 
-    # Pertes moyennes RVQ
-    for k, v in tot_rvq_losses.items():
-        metrics[f"rvq_{k}"] = v / count
-
-    # Résolution globale de l'état du codebook (sans jamais avoir stocké les millions d'indices)
-    if global_bincounts is not None:
-        for q in range(global_bincounts.shape[0]):
-            counts = global_bincounts[q]
-
-            # 1. Utilisation active : Combien de codes ont un compte > 0 sur tout le dataset ?
-            active_pct = (torch.sum(counts > 0).item() / codebook_size) * 100.0
-
-            # 2. Perplexité exacte de la distribution globale
-            probs = counts / counts.sum()
-            entropy = -torch.sum(probs[probs > 0] * torch.log(probs[probs > 0]))
-            perplexity = torch.exp(entropy).item()
-
-            metrics[f"rvq_lvl_{q}/active_pct"] = active_pct
-            metrics[f"rvq_lvl_{q}/perplexity"] = perplexity
-
     return metrics, (sample_originals, sample_reconstructions)
-
-
-def calculate_codebook_metrics_per_level(all_indices, codebook_size):
-    """
-    Évalue mathématiquement la santé de l'espace latent pour chaque niveau de quantification (RVQ).
-    Calcule le pourcentage d'utilisation active du dictionnaire (Active Codes) et la perplexité 
-    de la distribution spatiale pour diagnostiquer un éventuel effondrement du codebook.
-
-    Args:
-        all_indices (torch.Tensor): Tenseur global contenant les indices discrets utilisés, de forme (B, num_quantizers, H, W).
-        codebook_size (int): La taille théorique maximale du dictionnaire.
-
-    Returns:
-        dict: Un dictionnaire associant à chaque niveau de quantification (lvl_i) ses métriques de santé fonctionnelle (active_pct et perplexity).
-    """
-    metrics = {}
-    num_levels = all_indices.shape[1]
-    
-    for i in range(num_levels):
-        flat_indices = all_indices[:, i, :, :].reshape(-1)
-        unique_indices = torch.unique(flat_indices)
-        active_pct = (len(unique_indices) / codebook_size) * 100.0
-
-        counts = torch.bincount(flat_indices, minlength=codebook_size).float()
-        probs = counts / counts.sum()
-        entropy = -torch.sum(probs[probs > 0] * torch.log(probs[probs > 0]))
-        perplexity = torch.exp(entropy).item()
-
-        metrics[f"lvl_{i}/active_pct"] = active_pct
-        metrics[f"lvl_{i}/perplexity"] = perplexity
-        
-    return metrics
 
 
 def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None, scheduler=None):
@@ -413,11 +344,11 @@ def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None,
             - best_score (float): Le meilleur score de validation précédemment enregistré.
     """
     if not os.path.exists(checkpoint_path):
-        return 1, -1.0
+        raise FileExistsError(f"Erreur critique {checkpoint_path} n'existe pas sur votre machine")
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
     state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.get('model_state_dict', checkpoint).items()}
-    model.load_state_dict(state_dict, strict=False)
+    model.load_state_dict(state_dict)
 
     start_epoch = checkpoint.get('epoch', 0) + 1
     best_score = checkpoint.get('best_score', checkpoint.get('best_val_loss', -1.0))
@@ -431,39 +362,6 @@ def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None,
 
     return start_epoch, best_score
 
-
-
-def plot_images(images, titles, save_path):
-    """
-    Génère et sauvegarde une grille visuelle à partir d'une liste de tenseurs d'images ou de tableaux NumPy.
-    Applique la dé-normalisation nécessaire pour un affichage correct.
-
-    Args:
-        images (list): Liste de tenseurs PyTorch ou de tableaux NumPy représentant les images.
-        titles (list of str): Titres associés à chaque image de la grille.
-        save_path (str): Chemin complet de destination pour la sauvegarde du fichier image.
-    """
-    f, ax = plt.subplots(1, len(images), figsize=(5 * len(images), 5))
-    if len(images) == 1:
-        ax = [ax]
-
-    for i in range(len(images)):
-        img_tensor = images[i]
-
-        if hasattr(img_tensor, 'permute'):
-            # Dé-normalisation (-1, 1 -> 0, 1) et passage en (H, W, C)
-            img = (img_tensor.permute(1, 2, 0) * 0.5 + 0.5).clamp(0, 1).cpu().numpy()
-        else:
-            img = img_tensor
-
-        ax[i].imshow(img, cmap="gray" if img.shape[-1] == 1 else None, interpolation='nearest')
-        ax[i].set_title(titles[i])
-        ax[i].axis("off")
-
-    # Création du dossier si nécessaire et sauvegarde
-    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, bbox_inches='tight', dpi=150)
-    plt.close(f)
 
 
 def to_wandb(img_tensor):
@@ -537,7 +435,6 @@ def visualize_latent_interpolation(model, dataloader, device, save_path, skip_mo
         res = model.decode(z_interp, skips_a if skip_mode != "none" else None)
         interpolation_results.append(res.cpu().squeeze(0))
 
-    plot_images(interpolation_results, [f"t={a:.2f}" for a in alphas], save_path)
     return interpolation_results
 
 
@@ -574,6 +471,5 @@ def sample_from_latent(model, dataloader, device, save_path, skip_mode, num_samp
     generated = model.decode(z_random, skip_features=None)
 
     gen_list = [generated[i].cpu() for i in range(num_samples)]
-    plot_images(gen_list, [f"Sample {i}" for i in range(num_samples)], save_path)
 
     return gen_list

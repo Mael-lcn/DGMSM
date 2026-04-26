@@ -112,12 +112,11 @@ def train_one_epoch(
     total_epochs,
     use_amp,
     amp_dtype,
-    accum_steps,
-    codebook_size
+    accum_steps
 ):
     """
     Exécute une itération complète d'entraînement (une époque) sur le jeu de données fourni.
-    Gère le passage avant, le calcul de la perte globale (reconstruction + engagement RVQ), la rétropropagation via précision mixte (AMP), 
+    Gère le passage avant, le calcul de la perte globale reconstruction, la rétropropagation via précision mixte (AMP), 
     l'écrêtage des gradients (gradient clipping) pour la stabilité du dictionnaire, et l'approximation en temps réel de la santé de l'espace latent.
 
     Args:
@@ -133,10 +132,9 @@ def train_one_epoch(
         use_amp (bool): Activation de la précision mixte automatique.
         amp_dtype (torch.dtype): Le format de précision mixte ciblé.
         accum_steps (int): Nombre d'étapes d'accumulation de gradient avant la mise à jour des poids.
-        codebook_size (int): La taille maximale du dictionnaire pour calculer l'activité d'échantillonnage par lot.
 
     Returns:
-        dict: Dictionnaire consolidé contenant les métriques moyennes d'entraînement calculées sur l'époque (loss, rvq_metrics, active_pct).
+        dict: Dictionnaire consolidé contenant les métriques moyennes d'entraînement calculées sur l'époque loss.
     """
     model.train()
     loop = tqdm(dataloader, desc=f"ep {epoch}/{total_epochs} [train]", dynamic_ncols=False)
@@ -149,8 +147,8 @@ def train_one_epoch(
         x = x.to(device, non_blocking=True)
 
         with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
-            predictions, rvq_loss, rvq_info = model(x)
-            loss = (criterion(predictions, x) + rvq_loss) / accum_steps
+            predictions = model(x)
+            loss = criterion(predictions, x) / accum_steps
 
         if scaler:
             scaler.scale(loss).backward()
@@ -173,19 +171,7 @@ def train_one_epoch(
         loss_val = loss.item() * accum_steps
         if math.isfinite(loss_val):
             epoch_metrics['loss'] += loss_val
-            
-            if 'metrics' in rvq_info:
-                for k, v in rvq_info['metrics'].items():
-                    epoch_metrics[f"rvq/{k}"] += v
 
-            # Approximation de l'activité du codebook par batch pour le suivi d'entraînement
-            if 'indices' in rvq_info:
-                indices = rvq_info['indices']
-                for q in range(indices.shape[1]):
-                    flat_idx = indices[:, q, :, :].reshape(-1)
-                    active_codes = len(torch.unique(flat_idx))
-                    epoch_metrics[f"rvq/lvl_{q}/active_pct"] += (active_codes / codebook_size) * 100.0
-                    
             count += 1
             loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{epoch_metrics['loss']/count:.4f}")
 
@@ -348,9 +334,6 @@ def run(args):
         skip_mode=args.skip_mode,
         upsampling_mode=args.upsampling_mode,
         dropout=args.dropout,
-        use_rvq=args.use_rvq,
-        num_quantizers=args.num_quantizers,
-        codebook_size=args.codebook_size
     )
 
     model.apply(weights_init)

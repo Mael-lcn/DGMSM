@@ -1,7 +1,6 @@
 import os
 import sys
 import time
-import math
 import argparse
 
 import wandb
@@ -24,20 +23,6 @@ from core_utils import to_wandb
 
 
 
-def calculate_psnr(mse, max_val=1.0):
-    """
-    Calcule le Peak Signal-to-Noise Ratio (PSNR) à partir de l'erreur quadratique moyenne (MSE).
-
-    Args:
-        mse (float): L'erreur quadratique moyenne calculée entre l'image originale et la reconstruction.
-        max_val (float): La valeur maximale possible pour un pixel de l'image (intensité maximale théorique).
-
-    Returns:
-        float: La valeur du PSNR en décibels (dB), ou l'infini si le MSE est nul ou négatif.
-    """
-    if mse <= 0: return float('inf')
-    return 20 * math.log10(max_val) - 10 * math.log10(mse)
-
 def run(args):
     """
     orchestration de l'évaluation avec injection dynamique des métriques d'espace latent.
@@ -53,8 +38,7 @@ def run(args):
     model = UNet2d(
         input_dim=args.in_channels, output_dim=args.out_channels, hidden_dims=args.hidden_dims,
         kernel_size=args.kernel_size, padding_mode=args.padding_mode, skip_mode=args.skip_mode,
-        upsampling_mode=args.upsampling_mode, dropout=args.dropout, use_rvq=args.use_rvq,
-        num_quantizers=args.num_quantizers, codebook_size=args.codebook_size
+        upsampling_mode=args.upsampling_mode, dropout=args.dropout
     ).to(device)
 
     load_checkpoint(os.path.join(args.checkpoint_dir, args.checkpoint), model, device)
@@ -95,23 +79,13 @@ def run(args):
         "test_metrics_sota/ms_ssim": metrics['ms_ssim'],
         "test_metrics_sota/lpips": metrics['lpips'],
         "test_metrics_sota/fid": metrics['fid'],
-        
+
         "performance/inference_time_sec": inference_time,
 
         "visuel/1_originaux": to_wandb_img(sample_origs[:4], "original"),
         "visuel/2_reconstructions": to_wandb_img(sample_recons[:4], "recon"),
         "visuel/3_latent_interpolation": to_wandb_img(interp_images, "alpha"),
     }
-    
-    # Mapping rigoureux de toutes les données RVQ
-    for k, v in metrics.items():
-        if k.startswith("rvq_"):
-            wandb_logs[f"test_latent_health/{k}"] = v
-    
-    # ajout dynamique des métriques rvq au dictionnaire de log
-    for k, v in metrics.items():
-        if k.startswith("rvq_"):
-            wandb_logs[f"test_latent_health/{k}"] = v
 
     if random_images is not None:
         wandb_logs["visuel/4_random_sampling"] = to_wandb_img(random_images, "random")

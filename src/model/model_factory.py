@@ -26,7 +26,6 @@ def get_shared_parser():
     group_train.add_argument('--not_use_amp', action='store_false', default=False,
                              help="Désactive l'Automatic Mixed Precision (AMP). Passe en FP32.")
 
-
     # --- 3. ARCHITECTURE DU MODÈLE (U-Net Autoencodeur) ---
     group_model = parser.add_argument_group("3. Architecture du Modèle")
     group_model.add_argument('--image_size', type=int, default=256, 
@@ -51,13 +50,5 @@ def get_shared_parser():
                              help="Méthode d'upsampling dans le décodeur")
     group_model.add_argument('--dropout', type=float, default=0.1,
                              help="Taux de dropout pour la régularisation (0.0 = désactivé)")
-
-    # --- PARAMÈTRES RVQ ---
-    group_model.add_argument('--use_rvq', action='store_false', default=True,
-                             help="Active la quantification vectorielle résiduelle (RVQ)")
-    group_model.add_argument('--num_quantizers', type=int, default=4,
-                             help="Nombre de niveaux de quantification (profondeur du RVQ)")
-    group_model.add_argument('--codebook_size', type=int, default=1024,
-                             help="Taille du dictionnaire (nombre de vecteurs par niveau)")
 
     return parser

@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from Rvq import ResidualVectorQuantizer
 
 
 
@@ -112,10 +111,8 @@ class UNet2d(nn.Module):
                  padding_mode="valid",
                  skip_mode="none",
                  upsampling_mode="transpose",
-                 dropout=0.0,
-                 use_rvq=False,
-                 num_quantizers=4,
-                 codebook_size=1024):
+                 dropout=0.0
+                 ):
         
         super(UNet2d, self).__init__()
 
@@ -123,7 +120,6 @@ class UNet2d(nn.Module):
         assert padding_mode in ["same", "valid"], "Le mode de padding doit être 'same' ou 'valid'."
 
         self.padding_mode = padding_mode
-        self.use_rvq = use_rvq
 
         cropping = (padding_mode == "valid")
         padding = 0 if padding_mode == "valid" else kernel_size // 2
@@ -139,15 +135,6 @@ class UNet2d(nn.Module):
                 pooling=(i > 0), dropout=dropout if is_last else 0.0
             ))
         self.encoder = nn.ModuleList(encoder)
-
-        # Initialisation conditionnelle du RVQ
-        if self.use_rvq:
-            latent_dim = hidden_dims[-1]
-            self.rvq = ResidualVectorQuantizer(
-                num_quantizers=num_quantizers,
-                num_embeddings=codebook_size,
-                embedding_dim=latent_dim
-            )
 
         # Construction du décodeur
         decoder = []
@@ -195,18 +182,7 @@ class UNet2d(nn.Module):
         Effectue une passe avant complète avec quantification optionnelle.
         """
         z, skips = self.encode(x)
-        
-        rvq_loss = torch.tensor(0.0, device=x.device)
-        rvq_info = {}
-        
-        if self.use_rvq:
-            z, rvq_loss, all_indices, rvq_metrics = self.rvq(z)
-            rvq_info['indices'] = all_indices
-            rvq_info['metrics'] = rvq_metrics
-            
-        reconstructed = self.decode(z, skips)
-        
-        return reconstructed, rvq_loss, rvq_info
+        return self.decode(z, skips)
 
 
 def weights_init(m):
