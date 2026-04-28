@@ -1,38 +1,36 @@
+import argparse
+import glob
+import math
 import os
+import shutil
 import sys
 import time
-import math
-import glob
-import shutil
-import argparse
-from tqdm import tqdm
 from collections import defaultdict
-
-import wandb
 
 import torch
 import torch.nn as nn
+import wandb
+from tqdm import tqdm
 
-project_root = os.path.join(os.path.dirname(__file__), '../..')
+project_root = os.path.join(os.path.dirname(__file__), "../..")
 sys.path.append(os.path.abspath(project_root))
 
-from model_factory import get_shared_parser
-from core_utils import (
-    setup_global_environment, 
-    setup_wandb, 
-    run_inference, 
-    load_checkpoint,
-    get_food101_loaders
-)
 from Cae import UNet2d, weights_init
-from core_utils import to_wandb
-
+from core_utils import (
+    get_food101_loaders,
+    load_checkpoint,
+    run_inference,
+    setup_global_environment,
+    setup_wandb,
+    to_wandb,
+)
+from model_factory import get_shared_parser
 
 
 def generate_exp_name(args, wandb_id):
     """
     Génère une chaîne de caractères unique servant d'identifiant pour l'expérience en cours.
-    Le nom est construit dynamiquement en concaténant les hyperparamètres clés du modèle 
+    Le nom est construit dynamiquement en concaténant les hyperparamètres clés du modèle
     et un suffixe court issu de l'identifiant de session.
 
     Args:
@@ -42,14 +40,15 @@ def generate_exp_name(args, wandb_id):
     Returns:
         Le nom formaté de l'expérience.
     """
-    abbrv = {'image_size': 'sz', 'hidden_dims': 'dims', 'skip_mode': 'skip', 'lr': 'lr'}
+    abbrv = {"image_size": "sz", "hidden_dims": "dims", "skip_mode": "skip", "lr": "lr"}
     exp_parts = ["AE"]
 
     # On boucle sur les paramètres clés présents dans args
-    for p in ['image_size', 'hidden_dims', 'skip_mode', 'lr']:
+    for p in ["image_size", "hidden_dims", "skip_mode", "lr"]:
         val = getattr(args, p)
         name = abbrv.get(p, p)
-        if isinstance(val, list): val = "x".join(map(str, val))
+        if isinstance(val, list):
+            val = "x".join(map(str, val))
         exp_parts.append(f"{name}{val}")
 
     exp_parts.append(wandb_id[:6])
@@ -59,7 +58,7 @@ def generate_exp_name(args, wandb_id):
 def configure_optimizers(model, args):
     """
     Configure l'optimiseur et le planificateur de taux d'apprentissage pour l'entraînement.
-    Sépare les paramètres du modèle pour appliquer le déclin de poids de manière sélective, 
+    Sépare les paramètres du modèle pour appliquer le déclin de poids de manière sélective,
     en l'excluant systématiquement pour les biais et les couches de normalisation.
 
     Args:
@@ -78,10 +77,10 @@ def configure_optimizers(model, args):
         for pn, p in m.named_parameters(recurse=False):
             fpn = f"{mn}.{pn}" if mn else pn
 
-            if pn.endswith('bias'):
+            if pn.endswith("bias"):
                 # Tous les biais sont exclus
                 no_decay.add(fpn)
-            elif pn.endswith('weight') and isinstance(m, blacklist_modules):
+            elif pn.endswith("weight") and isinstance(m, blacklist_modules):
                 # Les poids des modules de normalisation sont exclus
                 no_decay.add(fpn)
             else:
@@ -89,14 +88,22 @@ def configure_optimizers(model, args):
                 decay.add(fpn)
 
     param_dict = {pn: p for pn, p in model.named_parameters()}
-    
+
     optim_groups = [
-        {"params": [param_dict[pn] for pn in sorted(list(decay))], "weight_decay": args.weight_decay},
-        {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
+        {
+            "params": [param_dict[pn] for pn in sorted(list(decay))],
+            "weight_decay": args.weight_decay,
+        },
+        {
+            "params": [param_dict[pn] for pn in sorted(list(no_decay))],
+            "weight_decay": 0.0,
+        },
     ]
 
     optimizer = torch.optim.AdamW(optim_groups, lr=args.lr, fused=True)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs, eta_min=1e-6)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=args.epochs, eta_min=1e-6
+    )
 
     return optimizer, scheduler
 
@@ -106,17 +113,17 @@ def train_one_epoch(
     dataloader,
     optimizer,
     criterion,
-    scaler, 
+    scaler,
     device,
     epoch,
     total_epochs,
     use_amp,
     amp_dtype,
-    accum_steps
+    accum_steps,
 ):
     """
     Exécute une itération complète d'entraînement (une époque) sur le jeu de données fourni.
-    Gère le passage avant, le calcul de la perte globale reconstruction, la rétropropagation via précision mixte (AMP), 
+    Gère le passage avant, le calcul de la perte globale reconstruction, la rétropropagation via précision mixte (AMP),
     l'écrêtage des gradients (gradient clipping) pour la stabilité du dictionnaire, et l'approximation en temps réel de la santé de l'espace latent.
 
     Args:
@@ -137,8 +144,10 @@ def train_one_epoch(
         dict: Dictionnaire consolidé contenant les métriques moyennes d'entraînement calculées sur l'époque loss.
     """
     model.train()
-    loop = tqdm(dataloader, desc=f"ep {epoch}/{total_epochs} [train]", dynamic_ncols=False)
-    
+    loop = tqdm(
+        dataloader, desc=f"ep {epoch}/{total_epochs} [train]", dynamic_ncols=False
+    )
+
     epoch_metrics = defaultdict(float)
     count = 0
     optimizer.zero_grad(set_to_none=True)
@@ -146,7 +155,9 @@ def train_one_epoch(
     for i, (x, _) in enumerate(loop):
         x = x.to(device, non_blocking=True)
 
-        with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
+        with torch.amp.autocast(
+            "cuda" if use_amp else "cpu", enabled=use_amp, dtype=amp_dtype
+        ):
             predictions = model(x)
             loss = criterion(predictions, x) / accum_steps
 
@@ -170,14 +181,16 @@ def train_one_epoch(
 
         loss_val = loss.item() * accum_steps
         if math.isfinite(loss_val):
-            epoch_metrics['loss'] += loss_val
+            epoch_metrics["loss"] += loss_val
 
             count += 1
-            loop.set_postfix(loss=f"{loss_val:.4f}", avg=f"{epoch_metrics['loss']/count:.4f}")
+            loop.set_postfix(
+                loss=f"{loss_val:.4f}", avg=f"{epoch_metrics['loss'] / count:.4f}"
+            )
 
     for k in epoch_metrics:
         epoch_metrics[k] /= max(1, count)
-        
+
     return dict(epoch_metrics)
 
 
@@ -189,19 +202,19 @@ def run_training_loop(
     optimizer,
     scheduler,
     criterion,
-    scaler, 
+    scaler,
     device,
     use_amp,
     amp_dtype,
     exp_name,
     start_epoch,
     best_val_loss,
-    fold=-1
+    fold=-1,
 ):
     """
     Orchestre la boucle principale d'entraînement et d'évaluation sur plusieurs époques.
-    Coordonne l'exécution de l'entraînement, déclenche les validations périodiques, gère la sauvegarde conditionnelle 
-    des meilleurs états (checkpoints) selon le score de validation, implémente l'arrêt prématuré (early stopping) 
+    Coordonne l'exécution de l'entraînement, déclenche les validations périodiques, gère la sauvegarde conditionnelle
+    des meilleurs états (checkpoints) selon le score de validation, implémente l'arrêt prématuré (early stopping)
     et assure la synchronisation de tous les artefacts et métriques avec la plateforme de suivi.
 
     Args:
@@ -228,24 +241,37 @@ def run_training_loop(
     stagnation_counter = 0
     best_model_path = None
     accum_steps = max(1, args.batch_size_theoric // args.batch_size_accumulat)
-    best_val_loss = float('inf') if best_val_loss < 0 else best_val_loss
+    best_val_loss = float("inf") if best_val_loss < 0 else best_val_loss
     total_start_time = time.time()
 
     for epoch in range(start_epoch, args.epochs + 1):
         train_metrics_dict = train_one_epoch(
-            model, train_loader, optimizer, scheduler, criterion, scaler, 
-            device, epoch, args.epochs, use_amp, amp_dtype, accum_steps, args.codebook_size
+            model,
+            train_loader,
+            optimizer,
+            scheduler,
+            criterion,
+            scaler,
+            device,
+            epoch,
+            args.epochs,
+            use_amp,
+            amp_dtype,
+            accum_steps,
+            args.codebook_size,
         )
 
         metrics = {
             f"{prefix}epoch": epoch,
-            f"{prefix}train/lr": optimizer.param_groups[0]['lr'], 
+            f"{prefix}train/lr": optimizer.param_groups[0]["lr"],
         }
         for k, v in train_metrics_dict.items():
             metrics[f"{prefix}train/{k}"] = v
 
         if epoch >= args.val_start_epoch:
-            val_loss, samples, is_valid = run_inference(model, val_loader, criterion, device, use_amp, amp_dtype)
+            val_loss, samples, is_valid = run_inference(
+                model, val_loader, criterion, device, use_amp, amp_dtype
+            )
 
             if is_valid:
                 metrics[f"{prefix}val/loss"] = val_loss
@@ -254,25 +280,45 @@ def run_training_loop(
                     best_val_loss = val_loss
                     stagnation_counter = 0
 
-                    for f in glob.glob(os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt")):
-                        try: os.remove(f)
-                        except OSError: pass
+                    for f in glob.glob(
+                        os.path.join(
+                            args.checkpoint_dir, f"best_model_{exp_name}_ep*.pt"
+                        )
+                    ):
+                        try:
+                            os.remove(f)
+                        except OSError:
+                            pass
 
-                    best_model_path = os.path.join(args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt")
+                    best_model_path = os.path.join(
+                        args.checkpoint_dir, f"best_model_{exp_name}_ep{epoch}.pt"
+                    )
                     checkpoint = {
-                        'epoch': epoch, 'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
-                        'best_score': best_val_loss
+                        "epoch": epoch,
+                        "model_state_dict": model.state_dict(),
+                        "optimizer_state_dict": optimizer.state_dict(),
+                        "scheduler_state_dict": scheduler.state_dict(),
+                        "best_score": best_val_loss,
                     }
-                    if scaler: checkpoint['scaler_state_dict'] = scaler.state_dict()
+                    if scaler:
+                        checkpoint["scaler_state_dict"] = scaler.state_dict()
                     torch.save(checkpoint, best_model_path)
-                    
+
                     wandb.run.summary["best_val_loss"] = best_val_loss
                     orig, recon = samples
-                    wandb.log({
-                        "reconstructions": [wandb.Image(to_wandb(o), caption="original") for o in orig] + 
-                                        [wandb.Image(to_wandb(r), caption="reconstruction") for r in recon]
-                    }, step=epoch)
+                    wandb.log(
+                        {
+                            "reconstructions": [
+                                wandb.Image(to_wandb(o), caption="original")
+                                for o in orig
+                            ]
+                            + [
+                                wandb.Image(to_wandb(r), caption="reconstruction")
+                                for r in recon
+                            ]
+                        },
+                        step=epoch,
+                    )
 
                 else:
                     stagnation_counter += 1
@@ -282,11 +328,18 @@ def run_training_loop(
 
         if epoch % 5 == 0:
             checkpoint = {
-                'epoch': epoch, 'model_state_dict': model.state_dict(), 'scheduler_state_dict': scheduler.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(), 'best_val_loss': best_val_loss
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "best_val_loss": best_val_loss,
             }
-            if scaler: checkpoint['scaler_state_dict'] = scaler.state_dict()
-            torch.save(checkpoint, os.path.join(args.checkpoint_dir, f"backup_{exp_name}_ep{epoch}.pt"))
+            if scaler:
+                checkpoint["scaler_state_dict"] = scaler.state_dict()
+            torch.save(
+                checkpoint,
+                os.path.join(args.checkpoint_dir, f"backup_{exp_name}_ep{epoch}.pt"),
+            )
 
         scheduler.step()
         wandb.log(metrics)
@@ -295,19 +348,25 @@ def run_training_loop(
     wandb.run.summary["total_train_time_hours"] = total_train_time_hours
 
     if best_model_path and os.path.exists(best_model_path):
-        shutil.copy2(best_model_path, os.path.join(wandb.run.dir, os.path.basename(best_model_path)))
-        artifact_name = f"model_Unet-{wandb.run.id}" + (f"-fold{fold}" if fold != -1 else "")
-        artifact = wandb.Artifact(artifact_name, type='model')
-        artifact.add_file(os.path.join(wandb.run.dir, os.path.basename(best_model_path)))
+        shutil.copy2(
+            best_model_path,
+            os.path.join(wandb.run.dir, os.path.basename(best_model_path)),
+        )
+        artifact_name = f"model_Unet-{wandb.run.id}" + (
+            f"-fold{fold}" if fold != -1 else ""
+        )
+        artifact = wandb.Artifact(artifact_name, type="model")
+        artifact.add_file(
+            os.path.join(wandb.run.dir, os.path.basename(best_model_path))
+        )
         wandb.log_artifact(artifact)
-
 
 
 def run(args):
     """
     Initialise les composants structurels et lance la procédure principale d'entraînement.
-    Configure l'environnement matériel, initialise le réseau et ses poids, prépare les 
-    flux de données et restaure éventuellement un état précédent à partir d'un fichier 
+    Configure l'environnement matériel, initialise le réseau et ses poids, prépare les
+    flux de données et restaure éventuellement un état précédent à partir d'un fichier
     avant de déléguer la gestion à la boucle d'entraînement.
 
     Args:
@@ -322,7 +381,8 @@ def run(args):
     id_file = os.path.join(args.checkpoint_dir, "wandb_run_id.txt")
 
     if args.resume_from and os.path.exists(id_file):
-        with open(id_file, "r") as f: wandb_id = f.read().strip() or wandb_id
+        with open(id_file, "r") as f:
+            wandb_id = f.read().strip() or wandb_id
         resume_mode = "must"
 
     model = UNet2d(
@@ -341,8 +401,15 @@ def run(args):
 
     exp_name = generate_exp_name(args, wandb_id)
 
-    setup_wandb(args, job_type="train", run_name=f"run_{exp_name}", wandb_id=wandb_id, resume_mode=resume_mode)
-    with open(id_file, "w") as f: f.write(wandb.run.id)
+    setup_wandb(
+        args,
+        job_type="train",
+        run_name=f"run_{exp_name}",
+        wandb_id=wandb_id,
+        resume_mode=resume_mode,
+    )
+    with open(id_file, "w") as f:
+        f.write(wandb.run.id)
 
     # 3. Dataloaders
     train_loader, val_loader, _ = get_food101_loaders(
@@ -355,16 +422,20 @@ def run(args):
     optimizer, scheduler = configure_optimizers(model, args)
 
     criterion = nn.L1Loss()
-    scaler = torch.amp.GradScaler('cuda', enabled=(amp_dtype == torch.float16)) if use_amp else None
+    scaler = (
+        torch.amp.GradScaler("cuda", enabled=(amp_dtype == torch.float16))
+        if use_amp
+        else None
+    )
 
     # 6. Reprise
     start_epoch, best_score = load_checkpoint(
-        args.resume_from if args.resume_from else "", 
-        model, 
-        device, 
-        optimizer, 
+        args.resume_from if args.resume_from else "",
+        model,
+        device,
+        optimizer,
         scaler,
-        scheduler=scheduler
+        scheduler=scheduler,
     )
     model = torch.compile(model)
 
@@ -372,27 +443,49 @@ def run(args):
         best_score = float(wandb.run.summary["best_val_loss"])
 
     # 7. Lancement
-    run_training_loop(args, model, train_loader, val_loader, optimizer, scheduler, criterion, scaler, device, use_amp, amp_dtype, exp_name, start_epoch, best_score)
+    run_training_loop(
+        args,
+        model,
+        train_loader,
+        val_loader,
+        optimizer,
+        scheduler,
+        criterion,
+        scaler,
+        device,
+        use_amp,
+        amp_dtype,
+        exp_name,
+        start_epoch,
+        best_score,
+    )
     wandb.finish()
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Script d'entraînement standard", parents=[get_shared_parser()])
-    parser.add_argument('--data', type=str, default='/Vrac/phd/data')
+    parser = argparse.ArgumentParser(
+        description="Script d'entraînement standard", parents=[get_shared_parser()]
+    )
+    parser.add_argument("--data", type=str, default="/Vrac/phd/data")
 
-    parser.add_argument('--epochs', type=int, default=60)
-    parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--backbone_lr', type=float, default=1e-4)
-    parser.add_argument('--weight_decay', type=float, default=1e-4)
-    parser.add_argument('--patience', type=int, default=10)
-    parser.add_argument('--val_start_epoch', type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=60)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--backbone_lr", type=float, default=1e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--val_start_epoch", type=int, default=10)
 
     # Arguments Système
-    parser.add_argument('--resume_from', type=str, default=None, 
-                        help="Chemin vers un fichier .pt pour reprendre l'entraînement")
+    parser.add_argument(
+        "--resume_from",
+        type=str,
+        default=None,
+        help="Chemin vers un fichier .pt pour reprendre l'entraînement",
+    )
 
     args = parser.parse_args()
     run(args)
+
 
 if __name__ == "__main__":
     main()

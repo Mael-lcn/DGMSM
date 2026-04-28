@@ -2,26 +2,30 @@ import torch
 import torch.nn as nn
 
 
-
 class EncoderLayerBN(nn.Module):
     """
-    Couche d'encodage standard intégrant des convolutions, une normalisation spatiale, 
+    Couche d'encodage standard intégrant des convolutions, une normalisation spatiale,
     et optionnellement un sous-échantillonnage par regroupement maximum.
     """
+
     def __init__(self, ch_in, ch_out, kernel_size, padding, pooling, dropout):
         super(EncoderLayerBN, self).__init__()
 
         self.pooling = nn.MaxPool2d(2) if pooling else None
 
         self.block = nn.Sequential(
-            nn.Conv2d(ch_in, ch_out, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv2d(
+                ch_in, ch_out, kernel_size=kernel_size, stride=1, padding=padding
+            ),
             nn.BatchNorm2d(ch_out),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
-            nn.Conv2d(ch_out, ch_out, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv2d(
+                ch_out, ch_out, kernel_size=kernel_size, stride=1, padding=padding
+            ),
             nn.BatchNorm2d(ch_out),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
         )
 
     def forward(self, x):
@@ -34,8 +38,18 @@ class DecoderLayerBN(nn.Module):
     """
     Couche de décodage gérant le suréchantillonnage et la fusion des caractéristiques résiduelles.
     """
-    def __init__(self, ch_in, ch_out, kernel_size, padding, dropout, 
-                 skip_mode= "none", upsampling_mode="transpose", cropping=False):
+
+    def __init__(
+        self,
+        ch_in,
+        ch_out,
+        kernel_size,
+        padding,
+        dropout,
+        skip_mode="none",
+        upsampling_mode="transpose",
+        cropping=False,
+    ):
         super(DecoderLayerBN, self).__init__()
 
         self.cropping = cropping
@@ -54,14 +68,18 @@ class DecoderLayerBN(nn.Module):
             ch_hidden = ch_out
 
         self.block = nn.Sequential(
-            nn.Conv2d(ch_hidden, ch_out, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv2d(
+                ch_hidden, ch_out, kernel_size=kernel_size, stride=1, padding=padding
+            ),
             nn.BatchNorm2d(ch_out),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
-            nn.Conv2d(ch_out, ch_out, kernel_size=kernel_size, stride=1, padding=padding),
+            nn.Conv2d(
+                ch_out, ch_out, kernel_size=kernel_size, stride=1, padding=padding
+            ),
             nn.BatchNorm2d(ch_out),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Dropout(dropout) if dropout > 0 else nn.Identity()
+            nn.Dropout(dropout) if dropout > 0 else nn.Identity(),
         )
 
     def crop(self, x, cropping_size):
@@ -84,7 +102,9 @@ class DecoderLayerBN(nn.Module):
             x = self.conv(self.up(x))
 
         if self.cropping and skip_features is not None:
-            cropping_size = (torch.tensor(skip_features.shape[2:]) - torch.tensor(x.shape[2:])) // 2
+            cropping_size = (
+                torch.tensor(skip_features.shape[2:]) - torch.tensor(x.shape[2:])
+            ) // 2
             skip_features = self.crop(skip_features, cropping_size)
 
         if self.skip_mode == "concat" and skip_features is not None:
@@ -101,39 +121,49 @@ class UNet2d(nn.Module):
     """
     Architecture U-Net configurable intégrant optionnellement une quantification vectorielle résiduelle.
     """
-    def __init__(self,
-                 input_dim,
-                 output_dim,
-                 encoder_layer=EncoderLayerBN,
-                 decoder_layer=DecoderLayerBN,
-                 hidden_dims=[64, 128, 256, 512, 1024],
-                 kernel_size=3,
-                 padding_mode="valid",
-                 skip_mode="none",
-                 upsampling_mode="transpose",
-                 dropout=0.0
-                 ):
-        
+
+    def __init__(
+        self,
+        input_dim,
+        output_dim,
+        encoder_layer=EncoderLayerBN,
+        decoder_layer=DecoderLayerBN,
+        hidden_dims=[64, 128, 256, 512, 1024],
+        kernel_size=3,
+        padding_mode="valid",
+        skip_mode="none",
+        upsampling_mode="transpose",
+        dropout=0.0,
+    ):
+
         super(UNet2d, self).__init__()
 
         assert len(hidden_dims) > 0, "UNet2d nécessite au moins une dimension cachée."
-        assert padding_mode in ["same", "valid"], "Le mode de padding doit être 'same' ou 'valid'."
+        assert padding_mode in ["same", "valid"], (
+            "Le mode de padding doit être 'same' ou 'valid'."
+        )
 
         self.padding_mode = padding_mode
 
-        cropping = (padding_mode == "valid")
+        cropping = padding_mode == "valid"
         padding = 0 if padding_mode == "valid" else kernel_size // 2
 
         # Construction de l'encodeur
         encoder = []
         for i in range(len(hidden_dims)):
-            ch_in = input_dim if i == 0 else hidden_dims[i-1]
+            ch_in = input_dim if i == 0 else hidden_dims[i - 1]
             ch_out = hidden_dims[i]
-            is_last = (i == len(hidden_dims) - 1)
-            encoder.append(encoder_layer(
-                ch_in, ch_out, kernel_size=kernel_size, padding=padding, 
-                pooling=(i > 0), dropout=dropout if is_last else 0.0
-            ))
+            is_last = i == len(hidden_dims) - 1
+            encoder.append(
+                encoder_layer(
+                    ch_in,
+                    ch_out,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    pooling=(i > 0),
+                    dropout=dropout if is_last else 0.0,
+                )
+            )
         self.encoder = nn.ModuleList(encoder)
 
         # Construction du décodeur
@@ -142,14 +172,24 @@ class UNet2d(nn.Module):
 
         for i in range(len(hidden_dims_rev) - 1):
             ch_in = hidden_dims_rev[i]
-            ch_out = hidden_dims_rev[i+1]
-            decoder.append(decoder_layer(
-                ch_in, ch_out, kernel_size=kernel_size, padding=padding, dropout=0.0, 
-                skip_mode=skip_mode, upsampling_mode=upsampling_mode, cropping=cropping
-            ))
+            ch_out = hidden_dims_rev[i + 1]
+            decoder.append(
+                decoder_layer(
+                    ch_in,
+                    ch_out,
+                    kernel_size=kernel_size,
+                    padding=padding,
+                    dropout=0.0,
+                    skip_mode=skip_mode,
+                    upsampling_mode=upsampling_mode,
+                    cropping=cropping,
+                )
+            )
         self.decoder = nn.ModuleList(decoder)
 
-        self.final_conv = nn.Conv2d(hidden_dims[0], output_dim, kernel_size=1, stride=1, padding=0)
+        self.final_conv = nn.Conv2d(
+            hidden_dims[0], output_dim, kernel_size=1, stride=1, padding=0
+        )
         self.final_act = nn.Tanh()
 
     def encode(self, x):
@@ -190,7 +230,9 @@ def weights_init(m):
     Initialise les poids du réseau de neurones selon des heuristiques standards.
     """
     if isinstance(m, (nn.Conv2d, nn.ConvTranspose2d)):
-        nn.init.kaiming_normal_(m.weight, mode="fan_in", nonlinearity="leaky_relu", a=0.2)
+        nn.init.kaiming_normal_(
+            m.weight, mode="fan_in", nonlinearity="leaky_relu", a=0.2
+        )
     elif isinstance(m, nn.BatchNorm2d):
         nn.init.constant_(m.weight, 1)
         nn.init.constant_(m.bias, 0)

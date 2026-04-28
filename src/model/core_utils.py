@@ -1,28 +1,27 @@
+import math
 import os
-import numpy as np
-import torch
-import wandb
-from tqdm import tqdm
-import torchvision.transforms as T
-from torchvision import datasets
-from torch.utils.data import DataLoader, Subset, ConcatDataset
-from sklearn.model_selection import train_test_split
+
 import matplotlib
 import matplotlib.pyplot as plt
-from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from torchmetrics.image.fid import FrechetInceptionDistance
+import numpy as np
+import torch
+import torchvision.transforms as T
+import wandb
+from sklearn.model_selection import train_test_split
+from torch.utils.data import ConcatDataset, DataLoader, Subset
 from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
-import math
+from torchmetrics.image.fid import FrechetInceptionDistance
+from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
+from torchvision import datasets
+from tqdm import tqdm
 
-
-
-matplotlib.use('Agg')
+matplotlib.use("Agg")
 
 
 def get_food101_loaders(data_dir, batch_size, image_size):
     """
     Prépare et retourne les chargeurs de données (DataLoaders) pour le jeu de données Food101.
-    Applique des transformations distinctes pour l'entraînement (avec augmentation) et 
+    Applique des transformations distinctes pour l'entraînement (avec augmentation) et
     l'évaluation (pures), tout en garantissant une séparation stratifiée stricte sans fuite de données.
 
     Args:
@@ -36,26 +35,44 @@ def get_food101_loaders(data_dir, batch_size, image_size):
     print(f"Préparation des données Food101...")
 
     # 1. Définition des transformations
-    train_transforms = T.Compose([
-        T.Resize(image_size), T.RandomCrop(image_size), T.RandomHorizontalFlip(p=0.5),
-        T.RandomRotation(degrees=15), T.ColorJitter(brightness=0.2, contrast=0.2),
-        T.ToTensor(), T.Normalize(mean=[0.5]*3, std=[0.5]*3)
-    ])
+    train_transforms = T.Compose(
+        [
+            T.Resize(image_size),
+            T.RandomCrop(image_size),
+            T.RandomHorizontalFlip(p=0.5),
+            T.RandomRotation(degrees=15),
+            T.ColorJitter(brightness=0.2, contrast=0.2),
+            T.ToTensor(),
+            T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
+        ]
+    )
 
-    val_transforms = T.Compose([
-        T.Resize(image_size), T.CenterCrop(image_size),
-        T.ToTensor(), T.Normalize(mean=[0.5]*3, std=[0.5]*3)
-    ])
+    val_transforms = T.Compose(
+        [
+            T.Resize(image_size),
+            T.CenterCrop(image_size),
+            T.ToTensor(),
+            T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
+        ]
+    )
 
     # 2. L'astuce pour éviter le bug des transformations
     # On crée une version "augmentée" et une version "pure" du dataset global
     print("Vérification du dataset...")
-    train_part_aug = datasets.Food101(root=data_dir, split='train', download=True, transform=train_transforms)
-    test_part_aug = datasets.Food101(root=data_dir, split='test', download=True, transform=train_transforms)
+    train_part_aug = datasets.Food101(
+        root=data_dir, split="train", download=True, transform=train_transforms
+    )
+    test_part_aug = datasets.Food101(
+        root=data_dir, split="test", download=True, transform=train_transforms
+    )
     full_dataset_aug = ConcatDataset([train_part_aug, test_part_aug])
 
-    train_part_pure = datasets.Food101(root=data_dir, split='train', download=True, transform=val_transforms)
-    test_part_pure = datasets.Food101(root=data_dir, split='test', download=True, transform=val_transforms)
+    train_part_pure = datasets.Food101(
+        root=data_dir, split="train", download=True, transform=val_transforms
+    )
+    test_part_pure = datasets.Food101(
+        root=data_dir, split="test", download=True, transform=val_transforms
+    )
     full_dataset_pure = ConcatDataset([train_part_pure, test_part_pure])
 
     # 3. Récupération des labels pour le split stratifié
@@ -65,29 +82,54 @@ def get_food101_loaders(data_dir, batch_size, image_size):
     # 4. Splitting AVEC random_state=42 (Garantit l'absence de data leak)
     keep_idx, keep_targets = all_indices, all_targets
 
-    train_idx, temp_idx, _, temp_targets = train_test_split(keep_idx, keep_targets, test_size=0.30, stratify=keep_targets, random_state=42)
-    val_idx, test_idx = train_test_split(temp_idx, test_size=0.50, stratify=temp_targets, random_state=42)
+    train_idx, temp_idx, _, temp_targets = train_test_split(
+        keep_idx, keep_targets, test_size=0.30, stratify=keep_targets, random_state=42
+    )
+    val_idx, test_idx = train_test_split(
+        temp_idx, test_size=0.50, stratify=temp_targets, random_state=42
+    )
 
     # 5. Création des Subsets avec la BONNE transformation
-    train_dataset = Subset(full_dataset_aug, train_idx) # Seulement Train a la Data Augmentation
-    val_dataset = Subset(full_dataset_pure, val_idx)    # Val est pur
+    train_dataset = Subset(
+        full_dataset_aug, train_idx
+    )  # Seulement Train a la Data Augmentation
+    val_dataset = Subset(full_dataset_pure, val_idx)  # Val est pur
     test_dataset = Subset(full_dataset_pure, test_idx)  # Test est pur
 
     # 6. DataLoaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=2,
+        pin_memory=True,
+    )
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=2,
+        pin_memory=True,
+    )
 
-    print(f"Tailles des splits -> Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}")
+    print(
+        f"Tailles des splits -> Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}"
+    )
     return train_loader, val_loader, test_loader
-
 
 
 def setup_global_environment(args):
     """
     Initialise l'environnement matériel, la gestion de la mémoire et la précision mixte (AMP).
-    Configure l'allocation mémoire de PyTorch pour limiter la fragmentation, 
-    crée les dossiers de sauvegarde nécessaires et configure le périphérique cible. 
+    Configure l'allocation mémoire de PyTorch pour limiter la fragmentation,
+    crée les dossiers de sauvegarde nécessaires et configure le périphérique cible.
 
     Args:
         args (argparse.Namespace): Objet contenant les configurations globales du système.
@@ -102,20 +144,26 @@ def setup_global_environment(args):
     os.makedirs(args.checkpoint_dir, exist_ok=True)
     os.makedirs(args.output, exist_ok=True)
 
-    torch.set_float32_matmul_precision('high')
+    torch.set_float32_matmul_precision("high")
     torch.backends.cudnn.benchmark = True
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
         torch.cuda.ipc_collect()
         device = torch.device(f"cuda:{args.gpu}")
-        use_amp = not getattr(args, 'not_use_amp', False)
+        use_amp = not getattr(args, "not_use_amp", False)
 
-        amp_dtype = torch.bfloat16 if (use_amp and torch.cuda.is_bf16_supported()) else torch.float16
+        amp_dtype = (
+            torch.bfloat16
+            if (use_amp and torch.cuda.is_bf16_supported())
+            else torch.float16
+        )
         if use_amp:
-            print(f"[INIT] AMP activé ({'BFloat16' if amp_dtype == torch.bfloat16 else 'Float16'})")
+            print(
+                f"[INIT] AMP activé ({'BFloat16' if amp_dtype == torch.bfloat16 else 'Float16'})"
+            )
 
-        torch.backends.cudnn.benchmark = getattr(args, 'use_static_padding', False)
+        torch.backends.cudnn.benchmark = getattr(args, "use_static_padding", False)
         torch.backends.cuda.enable_flash_sdp(True)
         torch.backends.cuda.enable_mem_efficient_sdp(True)
         torch.backends.cuda.enable_math_sdp(True)
@@ -126,10 +174,12 @@ def setup_global_environment(args):
     return device, use_amp, amp_dtype
 
 
-def setup_wandb(args, job_type, run_name, group=None, wandb_id=None, resume_mode="allow", tags=None):
+def setup_wandb(
+    args, job_type, run_name, group=None, wandb_id=None, resume_mode="allow", tags=None
+):
     """
     Initialise une session Weights & Biases (WandB) de manière modulaire et isolée.
-    Configure un environnement en mode hors ligne pour le suivi des expériences et 
+    Configure un environnement en mode hors ligne pour le suivi des expériences et
     gère la création des répertoires de cache temporaires.
 
     Args:
@@ -150,7 +200,7 @@ def setup_wandb(args, job_type, run_name, group=None, wandb_id=None, resume_mode
     base_wandb_path = os.path.join(args.output, "wandb_logs")
     os.makedirs(base_wandb_path, exist_ok=True)
 
-    os.environ["WANDB_MODE"] = "offline" 
+    os.environ["WANDB_MODE"] = "offline"
     os.environ["WANDB_DIR"] = base_wandb_path
     os.environ["WANDB_CACHE_DIR"] = os.path.join(base_wandb_path, "cache")
     os.environ["TMPDIR"] = os.path.join(base_wandb_path, "tmp")
@@ -158,7 +208,8 @@ def setup_wandb(args, job_type, run_name, group=None, wandb_id=None, resume_mode
     os.makedirs(os.environ["TMPDIR"], exist_ok=True)
 
     default_tags = ["offline"]
-    if tags: default_tags.extend(tags)
+    if tags:
+        default_tags.extend(tags)
 
     wandb.init(
         project="phd",
@@ -168,16 +219,18 @@ def setup_wandb(args, job_type, run_name, group=None, wandb_id=None, resume_mode
         config=vars(args),
         id=wandb_id,
         resume=resume_mode,
-        tags=list(set(default_tags))
+        tags=list(set(default_tags)),
     )
     return wandb_id
 
 
 @torch.no_grad()
-def run_inference(model, dataloader, criterion, device, use_amp, amp_dtype, desc="[Inférence]"):
+def run_inference(
+    model, dataloader, criterion, device, use_amp, amp_dtype, desc="[Inférence]"
+):
     """
     Exécute une boucle d'inférence universelle sans calcul de gradient.
-    Gère la précision mixte (AMP), calcule la perte moyenne et surveille la validité numérique 
+    Gère la précision mixte (AMP), calcule la perte moyenne et surveille la validité numérique
     des prédictions pour détecter les valeurs anormales (NaN/Inf).
 
     Args:
@@ -204,7 +257,9 @@ def run_inference(model, dataloader, criterion, device, use_amp, amp_dtype, desc
     for images, _ in tqdm(dataloader, desc=desc, leave=False):
         images = images.to(device, non_blocking=True)
 
-        with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
+        with torch.amp.autocast(
+            "cuda" if use_amp else "cpu", enabled=use_amp, dtype=amp_dtype
+        ):
             reconstructed = model(images)
             loss = criterion(reconstructed, images)
             if not torch.isfinite(loss):
@@ -217,14 +272,17 @@ def run_inference(model, dataloader, criterion, device, use_amp, amp_dtype, desc
             sample_originals = images[:8].cpu()
             sample_reconstructions = reconstructed[:8].cpu()
 
-    return total_loss / max(1, count), (sample_originals, sample_reconstructions), is_valid
-
+    return (
+        total_loss / max(1, count),
+        (sample_originals, sample_reconstructions),
+        is_valid,
+    )
 
 
 def calculate_metrics_batch(origs_01, recons_01):
     """
     Calcule conjointement les métriques d'évaluation standard (PSNR, SNR, MSE, L1) pour un lot d'images.
-    Les tenseurs fournis doivent être préalablement normalisés dans l'intervalle [0, 1] 
+    Les tenseurs fournis doivent être préalablement normalisés dans l'intervalle [0, 1]
     pour garantir la validité physique et mathématique des résultats en décibels (dB).
 
     Args:
@@ -240,11 +298,13 @@ def calculate_metrics_batch(origs_01, recons_01):
     """
     mse_val = torch.mean((origs_01 - recons_01) ** 2).item()
     l1_val = torch.mean(torch.abs(origs_01 - recons_01)).item()
-    signal_power = torch.mean(origs_01 ** 2).item()
-    
-    psnr_val = 20 * math.log10(1.0) - 10 * math.log10(mse_val) if mse_val > 0 else float('inf')
-    snr_val = 10 * math.log10(signal_power / mse_val) if mse_val > 0 else float('inf')
-    
+    signal_power = torch.mean(origs_01**2).item()
+
+    psnr_val = (
+        20 * math.log10(1.0) - 10 * math.log10(mse_val) if mse_val > 0 else float("inf")
+    )
+    snr_val = 10 * math.log10(signal_power / mse_val) if mse_val > 0 else float("inf")
+
     return psnr_val, snr_val, mse_val, l1_val
 
 
@@ -252,8 +312,8 @@ def calculate_metrics_batch(origs_01, recons_01):
 def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_size):
     """
     Exécute une itération complète d'évaluation SOTA (State of the Art) sur un jeu de données.
-    Intègre le calcul optimisé des métriques perceptuelles et génératives (FID, LPIPS, MS-SSIM) 
-    ainsi qu'un suivi global et rigoureux de l'état de la quantification vectorielle (RVQ), 
+    Intègre le calcul optimisé des métriques perceptuelles et génératives (FID, LPIPS, MS-SSIM)
+    ainsi qu'un suivi global et rigoureux de l'état de la quantification vectorielle (RVQ),
     utilisant l'accumulation mathématique pour éviter toute saturation mémoire.
 
     Args:
@@ -270,10 +330,15 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
             - samples (tuple): Tenseurs contenant les 8 premières images originales et reconstruites du premier lot pour la visualisation.
     """
     from collections import defaultdict
+
     model.eval()
 
-    lpips_metric = LearnedPerceptualImagePatchSimilarity(net_type='vgg', normalize=True).to(device)
-    ms_ssim_metric = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0).to(device)
+    lpips_metric = LearnedPerceptualImagePatchSimilarity(
+        net_type="vgg", normalize=True
+    ).to(device)
+    ms_ssim_metric = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0).to(
+        device
+    )
     fid_metric = FrechetInceptionDistance(feature=2048, normalize=True).to(device)
 
     tot_l1, tot_mse, tot_psnr, tot_snr = 0.0, 0.0, 0.0, 0.0
@@ -289,7 +354,9 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
     for images, _ in tqdm(dataloader, desc="[EVAL]", leave=False):
         images = images.to(device, non_blocking=True)
 
-        with torch.amp.autocast('cuda' if use_amp else 'cpu', enabled=use_amp, dtype=amp_dtype):
+        with torch.amp.autocast(
+            "cuda" if use_amp else "cpu", enabled=use_amp, dtype=amp_dtype
+        ):
             reconstructed = model(images)
 
         origs_01 = (images * 0.5 + 0.5).clamp(0, 1).float()
@@ -297,8 +364,11 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
 
         # Métriques standard
         b_psnr, b_snr, b_mse, b_l1 = calculate_metrics_batch(origs_01, recons_01)
-        tot_psnr += b_psnr; tot_snr += b_snr; tot_mse += b_mse; tot_l1 += b_l1
-    
+        tot_psnr += b_psnr
+        tot_snr += b_snr
+        tot_mse += b_mse
+        tot_l1 += b_l1
+
         # Métriques perceptuelles
         tot_lpips += lpips_metric(recons_01, origs_01).item()
         tot_msssim += ms_ssim_metric(recons_01, origs_01).item()
@@ -319,13 +389,15 @@ def run_inference_eval(model, dataloader, device, use_amp, amp_dtype, codebook_s
         "snr": tot_snr / count,
         "lpips": tot_lpips / count,
         "ms_ssim": tot_msssim / count,
-        "fid": fid_metric.compute().item()
+        "fid": fid_metric.compute().item(),
     }
 
     return metrics, (sample_originals, sample_reconstructions)
 
 
-def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None, scheduler=None):
+def load_checkpoint(
+    checkpoint_path, model, device, optimizer=None, scaler=None, scheduler=None
+):
     """
     Restaure l'état d'un modèle et de son environnement d'entraînement à partir d'un point de sauvegarde.
     Gère le nettoyage des préfixes de compilation PyTorch lors de l'injection des poids.
@@ -344,30 +416,34 @@ def load_checkpoint(checkpoint_path, model, device, optimizer=None, scaler=None,
             - best_score (float): Le meilleur score de validation précédemment enregistré.
     """
     if not os.path.exists(checkpoint_path):
-        raise FileExistsError(f"Erreur critique {checkpoint_path} n'existe pas sur votre machine")
+        raise FileExistsError(
+            f"Erreur critique {checkpoint_path} n'existe pas sur votre machine"
+        )
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = {k.replace("_orig_mod.", ""): v for k, v in checkpoint.get('model_state_dict', checkpoint).items()}
+    state_dict = {
+        k.replace("_orig_mod.", ""): v
+        for k, v in checkpoint.get("model_state_dict", checkpoint).items()
+    }
     model.load_state_dict(state_dict)
 
-    start_epoch = checkpoint.get('epoch', 0) + 1
-    best_score = checkpoint.get('best_score', checkpoint.get('best_val_loss', -1.0))
+    start_epoch = checkpoint.get("epoch", 0) + 1
+    best_score = checkpoint.get("best_score", checkpoint.get("best_val_loss", -1.0))
 
-    if optimizer and 'optimizer_state_dict' in checkpoint:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    if scaler and 'scaler_state_dict' in checkpoint:
-        scaler.load_state_dict(checkpoint['scaler_state_dict'])
-    if scheduler and 'scheduler_state_dict' in checkpoint:
-        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    if optimizer and "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+    if scaler and "scaler_state_dict" in checkpoint:
+        scaler.load_state_dict(checkpoint["scaler_state_dict"])
+    if scheduler and "scheduler_state_dict" in checkpoint:
+        scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
 
     return start_epoch, best_score
-
 
 
 def to_wandb(img_tensor):
     """
     Convertit un tenseur d'image PyTorch en un format compatible avec l'affichage sur Weights & Biases.
-    Effectue une permutation des dimensions pour passer au format standard, une dé-normalisation 
+    Effectue une permutation des dimensions pour passer au format standard, une dé-normalisation
     des valeurs de pixels et une conversion finale en tableau NumPy.
 
     Args:
@@ -396,16 +472,18 @@ def plot_results(curves, labels, save_path):
     plt.ylabel("Loss")
     plt.legend()
     plt.grid()
-    
+
     os.makedirs(os.path.dirname(save_path), exist_ok=True)
-    plt.savefig(save_path, bbox_inches='tight', dpi=150)
+    plt.savefig(save_path, bbox_inches="tight", dpi=150)
     plt.close(f)
 
 
 @torch.no_grad()
-def visualize_latent_interpolation(model, dataloader, device, save_path, skip_mode, num_steps=8):
+def visualize_latent_interpolation(
+    model, dataloader, device, save_path, skip_mode, num_steps=8
+):
     """
-    Réalise une interpolation linéaire dans l'espace latent entre deux images distinctes 
+    Réalise une interpolation linéaire dans l'espace latent entre deux images distinctes
     et sauvegarde la progression visuelle de la reconstruction.
 
     Args:
@@ -441,7 +519,7 @@ def visualize_latent_interpolation(model, dataloader, device, save_path, skip_mo
 @torch.no_grad()
 def sample_from_latent(model, dataloader, device, save_path, skip_mode, num_samples=8):
     """
-    Génère un ensemble de nouvelles images en échantillonnant des vecteurs de bruit aléatoires 
+    Génère un ensemble de nouvelles images en échantillonnant des vecteurs de bruit aléatoires
     directement dans l'espace latent, puis sauvegarde les résultats visuels.
 
     Args:
@@ -459,13 +537,13 @@ def sample_from_latent(model, dataloader, device, save_path, skip_mode, num_samp
 
     batch, _ = next(iter(dataloader))
     dummy_z, _ = model.encode(batch[0:1].to(device))
-    latent_shape = dummy_z.shape[1:] # ex: (1024, 16, 16)
+    latent_shape = dummy_z.shape[1:]  # ex: (1024, 16, 16)
 
     # Génération du bruit avec la bonne shape
     z_random = torch.randn(num_samples, *latent_shape).to(device)
 
     # Décodage
-    # Note : Si skip_mode="concat" ou "add", générer du bruit est très dur car 
+    # Note : Si skip_mode="concat" ou "add", générer du bruit est très dur car
     # le décodeur attend aussi des tenseurs spatiaux de haute résolution (les skips).
     # On passe None et on espère que le réseau gère (ou on force skip_mode="none").
     generated = model.decode(z_random, skip_features=None)
