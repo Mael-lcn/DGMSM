@@ -5,114 +5,67 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import torchvision.transforms as T
 import wandb
-from sklearn.model_selection import train_test_split
-from torch.utils.data import ConcatDataset, DataLoader, Subset
+from torch.utils.data import DataLoader, TensorDataset
 from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
-from torchvision import datasets
 from tqdm import tqdm
 
 matplotlib.use("Agg")
 
 
-def get_food101_loaders(data_dir, batch_size, image_size):
+def get_alanineDipeptide_loaders(local_filename, batch_size):
     """
-    Prépare et retourne les chargeurs de données (DataLoaders) pour le jeu de données Food101.
-    Applique des transformations distinctes pour l'entraînement (avec augmentation) et
-    l'évaluation (pures), tout en garantissant une séparation stratifiée stricte sans fuite de données.
+    Prépare et retourne les chargeurs de données (DataLoaders) pour l'alanine dipeptide de mdshare.
 
     Args:
-        data_dir (str): Chemin vers le répertoire de stockage du jeu de données.
+        local_filename (str): nom du fichier à télécharger.
         batch_size (int): Nombre d'échantillons par lot.
-        image_size (int): Dimension cible pour le redimensionnement spatial des images.
 
     Returns:
         tuple: Un tuple contenant les trois DataLoaders (train_loader, val_loader, test_loader).
     """
-    print(f"Préparation des données Food101...")
+    print("Préparation des données Alanine-Dipeptide...")
 
-    # 1. Définition des transformations
-    train_transforms = T.Compose(
-        [
-            T.Resize(image_size),
-            T.RandomCrop(image_size),
-            T.RandomHorizontalFlip(p=0.5),
-            T.RandomRotation(degrees=15),
-            T.ColorJitter(brightness=0.2, contrast=0.2),
-            T.ToTensor(),
-            T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
+    # 1. Traj loading
+    with np.load(local_filename) as fh:
+        trajs = [
+            torch.tensor(fh[key], dtype=torch.float32) for key in sorted(fh.keys())
         ]
-    )
+    data = torch.cat(trajs, dim=0)
 
-    val_transforms = T.Compose(
-        [
-            T.Resize(image_size),
-            T.CenterCrop(image_size),
-            T.ToTensor(),
-            T.Normalize(mean=[0.5] * 3, std=[0.5] * 3),
-        ]
-    )
+    # 2. Split train/val/test
+    N = len(data)
+    end_train, end_val = int(0.8 * N), int(0.9 * N)
 
-    # 2. L'astuce pour éviter le bug des transformations
-    # On crée une version "augmentée" et une version "pure" du dataset global
-    print("Vérification du dataset...")
-    train_part_aug = datasets.Food101(
-        root=data_dir, split="train", download=True, transform=train_transforms
-    )
-    test_part_aug = datasets.Food101(
-        root=data_dir, split="test", download=True, transform=train_transforms
-    )
-    full_dataset_aug = ConcatDataset([train_part_aug, test_part_aug])
+    train = data[:end_train]
+    val = data[end_train:end_val]
+    test = data[end_val:]
 
-    train_part_pure = datasets.Food101(
-        root=data_dir, split="train", download=True, transform=val_transforms
-    )
-    test_part_pure = datasets.Food101(
-        root=data_dir, split="test", download=True, transform=val_transforms
-    )
-    full_dataset_pure = ConcatDataset([train_part_pure, test_part_pure])
+    # 3. Normalization
+    mean, std = torch.mean(train, dim=0), torch.std(train, dim=0)
 
-    # 3. Récupération des labels pour le split stratifié
-    all_targets = train_part_pure._labels + test_part_pure._labels
-    all_indices = list(range(len(full_dataset_pure)))
+    def normalize(x):
+        return (x - mean) / std
 
-    # 4. Splitting AVEC random_state=42 (Garantit l'absence de data leak)
-    keep_idx, keep_targets = all_indices, all_targets
-
-    train_idx, temp_idx, _, temp_targets = train_test_split(
-        keep_idx, keep_targets, test_size=0.30, stratify=keep_targets, random_state=42
-    )
-    val_idx, test_idx = train_test_split(
-        temp_idx, test_size=0.50, stratify=temp_targets, random_state=42
-    )
-
-    # 5. Création des Subsets avec la BONNE transformation
-    train_dataset = Subset(
-        full_dataset_aug, train_idx
-    )  # Seulement Train a la Data Augmentation
-    val_dataset = Subset(full_dataset_pure, val_idx)  # Val est pur
-    test_dataset = Subset(full_dataset_pure, test_idx)  # Test est pur
-
-    # 6. DataLoaders
+    # 4. DataLoaders
     train_loader = DataLoader(
-        train_dataset,
+        TensorDataset(normalize(train)),
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=False,
         num_workers=2,
         pin_memory=True,
     )
     val_loader = DataLoader(
-        val_dataset,
+        TensorDataset(normalize(val)),
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
         pin_memory=True,
     )
     test_loader = DataLoader(
-        test_dataset,
+        TensorDataset(normalize(test)),
         batch_size=batch_size,
         shuffle=False,
         num_workers=2,
@@ -120,7 +73,7 @@ def get_food101_loaders(data_dir, batch_size, image_size):
     )
 
     print(
-        f"Tailles des splits -> Train: {len(train_dataset)}, Val: {len(val_dataset)}, Test: {len(test_dataset)}"
+        f"Tailles des splits -> Train: {len(train)}, Val: {len(val)}, Test: {len(test)}"
     )
     return train_loader, val_loader, test_loader
 
@@ -254,14 +207,14 @@ def run_inference(
     is_valid = True
     sample_originals, sample_reconstructions = [], []
 
-    for images, _ in tqdm(dataloader, desc=desc, leave=False):
-        images = images.to(device, non_blocking=True)
+    for (seq,) in tqdm(dataloader, desc=desc, leave=False):
+        seq = seq.to(device, non_blocking=True)
 
         with torch.amp.autocast(
             "cuda" if use_amp else "cpu", enabled=use_amp, dtype=amp_dtype
         ):
-            reconstructed = model(images)
-            loss = criterion(reconstructed, images)
+            reconstructed = model(seq)
+            loss = criterion(reconstructed, seq)
             if not torch.isfinite(loss):
                 is_valid = False
 
@@ -269,7 +222,7 @@ def run_inference(
         count += 1
 
         if len(sample_originals) == 0:
-            sample_originals = images[:8].cpu()
+            sample_originals = seq[:8].cpu()
             sample_reconstructions = reconstructed[:8].cpu()
 
     return (
@@ -279,33 +232,23 @@ def run_inference(
     )
 
 
-def calculate_metrics_batch(origs_01, recons_01):
+def calculate_metrics_batch(origs, recons):
     """
-    Calcule conjointement les métriques d'évaluation standard (PSNR, SNR, MSE, L1) pour un lot d'images.
-    Les tenseurs fournis doivent être préalablement normalisés dans l'intervalle [0, 1]
-    pour garantir la validité physique et mathématique des résultats en décibels (dB).
+    calculates the MSE and RMSD for molecular configurations
 
     Args:
-        origs_01 (torch.Tensor): Tenseur contenant le lot d'images originales (min: 0.0, max: 1.0).
-        recons_01 (torch.Tensor): Tenseur contenant le lot d'images reconstruites (min: 0.0, max: 1.0).
+        origs (torch.Tensor): original configuration
+        recons (torch.Tensor): reconstructed configuration
 
     Returns:
-        tuple: Un tuple contenant les quatre métriques calculées sous forme de scalaires :
-            - psnr_val (float): Peak Signal-to-Noise Ratio mesuré en décibels (dB).
-            - snr_val (float): Signal-to-Noise Ratio mesuré en décibels (dB).
+        tuple: a tuple with the two calculated metrics :
             - mse_val (float): Erreur quadratique moyenne (L2 Loss).
-            - l1_val (float): Erreur absolue moyenne (L1 Loss).
+            - rmsd (float): root mean square deviation.
     """
-    mse_val = torch.mean((origs_01 - recons_01) ** 2).item()
-    l1_val = torch.mean(torch.abs(origs_01 - recons_01)).item()
-    signal_power = torch.mean(origs_01**2).item()
+    mse_val = torch.mean((origs - recons) ** 2).item()
+    rmsd_val = torch.mean(torch.sqrt(torch.mean((origs - recons) ** 2, dim=1))).item()
 
-    psnr_val = (
-        20 * math.log10(1.0) - 10 * math.log10(mse_val) if mse_val > 0 else float("inf")
-    )
-    snr_val = 10 * math.log10(signal_power / mse_val) if mse_val > 0 else float("inf")
-
-    return psnr_val, snr_val, mse_val, l1_val
+    return mse_val, rmsd_val
 
 
 @torch.no_grad()
