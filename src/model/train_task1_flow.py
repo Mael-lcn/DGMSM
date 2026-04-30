@@ -17,7 +17,7 @@ from DGMSM.src.model.flowMatching.improved_diffusion.script_util import (
     add_dict_to_argparser,
 )
 from DGMSM.src.model.flowMatching.improved_diffusion.train_util import TrainLoop
-from DGMSM.src.model.flowMatching.CMRxRecon import CMRxReconDataset
+from DGMSM.src.model.AlanineDipeptideChunkDataset import CMRxReconDataset
 
 warnings.filterwarnings('ignore')
 

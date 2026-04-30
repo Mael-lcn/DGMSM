@@ -19,7 +19,7 @@ from core_utils import (
     to_wandb,
     visualize_latent_interpolation,
 )
-from model_factory import get_shared_parser
+from DGMSM.src.model.config import get_shared_parser
 
 
 def run(args):

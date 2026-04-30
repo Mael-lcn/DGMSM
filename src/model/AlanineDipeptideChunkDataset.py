@@ -4,7 +4,7 @@ from torch.utils.data import Dataset, DataLoader
 
 
 
-class PrecomputedChunksDataset(Dataset):
+class AlanineDipeptideChunkDataset(Dataset):
     """
     Dataset PyTorch pour le chargement de fenêtres temporelles pré-calculées.
 

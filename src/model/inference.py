@@ -13,7 +13,7 @@ from DGMSM.src.model.flowMatching.improved_diffusion.script_util import (
     args_to_dict,
     add_dict_to_argparser,
 )
-from DGMSM.src.model.flowMatching.CMRxRecon import CMRxReconDataset
+from DGMSM.src.model.AlanineDipeptideChunkDataset import CMRxReconDataset
 from DGMSM.src.model.flowMatching.improved_diffusion.sampling_util import CMR_sampling_major_vote_func
 
 
