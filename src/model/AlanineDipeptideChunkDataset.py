@@ -67,7 +67,7 @@ if __name__ == "__main__":
     context_size = 5
 
     try:
-        train_dataset = PrecomputedChunksDataset(
+        train_dataset = AlanineDipeptideChunkDataset(
             file_path=train_file,
             context_length=context_size
         )

@@ -1,7 +1,7 @@
 import torch.nn as nn
 
-from MambaContextEncoder import MambaContextEncoder
-from flowMatching.improved_diffusion.FlowNetwork import FlowNetwork1D
+from DGMSM.src.model.MambaContextEncoder import MambaContextEncoder
+from FlowNetwork import FlowNetwork1D
 
 
 
@@ -12,7 +12,8 @@ class ConditionalFlowMolecule(nn.Module):
     """
     def __init__(
         self,
-        in_channels=2,
+        mamba_in_channels=2,
+        flow_in_channels=4,
         context_dim=256,
         mamba_layers=4,
         flow_channels=128,
@@ -22,7 +23,7 @@ class ConditionalFlowMolecule(nn.Module):
 
         # Lit le passé et génère le contexte C
         self.encoder = MambaContextEncoder(
-            in_channels=in_channels,
+            in_channels=mamba_in_channels,
             mamba_dim=context_dim,
             num_mamba_layers=mamba_layers,
             out_channels=context_dim
@@ -30,7 +31,7 @@ class ConditionalFlowMolecule(nn.Module):
 
         # Le Moteur : Prend le bruit, le temps, et le contexte C pour prédire la vélocité
         self.vector_field = FlowNetwork1D(
-            in_channels=in_channels,
+            in_channels=flow_in_channels,
             model_channels=flow_channels,
             num_blocks=flow_blocks,
             mamba_dim=context_dim

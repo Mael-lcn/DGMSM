@@ -1,115 +1,113 @@
-import argparse
 import os
-import warnings
-from DGMSM.src.model.flowMatching.improved_diffusion import dist_util
+import math
+from tqdm import tqdm
+
 import torch
-import torch.distributed as dist
-import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
 
-from DGMSM.src.model.flowMatching.improved_diffusion import logger
-from DGMSM.src.model.flowMatching.improved_diffusion.script_util import (
-    model_and_diffusion_defaults,
-    create_model_and_diffusion,
-    args_to_dict,
-    add_dict_to_argparser,
-)
-from DGMSM.src.model.AlanineDipeptideChunkDataset import CMRxReconDataset
-from DGMSM.src.model.flowMatching.improved_diffusion.sampling_util import CMR_sampling_major_vote_func
+from config import get_shared_parser
+from flowMatching.ConditionalFlowMolecule import ConditionalFlowMolecule
+from flowMatching.flow_matching import FlowMatchingEngine
+from flowMatching.Evaluation import plot_trajectory, TrajectoryMetrics, circular_mae
 
+from AlanineDipeptideChunkDataset import AlanineDipeptideChunkDataset 
 
-
-warnings.filterwarnings('ignore')
-
-
-def create_argparser():
-    """
-    Définition des arguments pour l'inférence.
-    On reprend la base de model_and_diffusion_defaults.
-    """
-    defaults = dict(
-        # --- Chemins ---
-        model_path="/lustre/fsn1/projects/rech/iql/uri76kx/ig3d_CMRxRecon/log/flow/logs_run1/model44000.pt",
-        val_pair_file="/lustre/fsn1/projects/rech/iql/uri76kx/ig3d_CMRxRecon/data/ValidationSet/pairs.txt",
-        result_dir="/lustre/fsn1/projects/rech/iql/uri76kx/ig3d_CMRxRecon/log/flow/eval/",
-
-        image_size=128,
-        diffusion_steps=100,
-
-        batch_size=8,
-        vote_num=4,
-        num_workers=4,
-
-        timestep_respacing="100",    # Accélération à 100 pas pour l'inférence
-        use_fp16=True,
-
-        model_type="diffusion",
-    )
-
-    final_defaults = model_and_diffusion_defaults()
-    final_defaults.update(defaults)
-
-    parser = argparse.ArgumentParser(description="Inférence et Évaluation DiffCMR / Flow Matching")
-    add_dict_to_argparser(parser, final_defaults)
-    return parser
 
 
 def main():
-    # Chargement des paramètres
-    args = create_argparser().parse_args()
+    # Chargement de la configuration
+    parser = get_shared_parser()
+    args = parser.parse_args()
 
-    # Initialisation distribuée (Multi-GPU)
+    if not args.model_path:
+        raise ValueError("ERREUR : On doit spécifier --model_path pour l'évaluation !")
+
+    os.makedirs(args.eval_dir, exist_ok=True)
+
     if torch.cuda.is_available():
-        dist_util.GPUS_PER_NODE = torch.cuda.device_count()
-    dist_util.setup_dist()
-
-    # Configuration du logger
-    if dist.get_rank() == 0:
-        os.makedirs(args.result_dir, exist_ok=True)
-        logger.configure(dir=args.result_dir, format_strs=["stdout", "log", "csv"])
+        device = torch.device("cuda")
+    elif torch.backends.mps.is_available():
+        device = torch.device("mps")
     else:
-        logger.configure(dir=args.result_dir, format_strs=[])
+        device = torch.device("cpu")
 
-    # Création du Modèle et de la Diffusion
-    logger.log(f"Loading model and diffusion (Steps: {args.diffusion_steps})...")
-    model_args = args_to_dict(args, model_and_diffusion_defaults().keys())
+    print(f"\nLancement de l'évaluation sur : {device}")
 
-    model_args["model_type"] = args.model_type
-    model, diffusion = create_model_and_diffusion(**model_args)
+    # Création de l'architecture
+    print(f"Chargement de l'architecture (Mamba Dim: {args.mamba_dim}, Flow Channels: {args.flow_channels})...")
+    model = ConditionalFlowMolecule(
+        mamba_in_channels=2,
+        flow_in_channels=4,
+        context_dim=args.mamba_dim,
+        mamba_layers=args.mamba_layers,
+        flow_channels=args.flow_channels,
+        flow_blocks=args.flow_blocks
+    )
+
+    # Moteur d'inférence (Euler solver)
+    diffusion_engine = FlowMatchingEngine(euler_steps=args.euler_steps)
 
     # Chargement des poids
-    model.load_state_dict(
-        dist_util.load_state_dict(args.model_path, map_location="cpu")
-    )
-    model.to(dist_util.dev())
+    print(f"Chargement des poids depuis : {args.model_path}")
+    model.load_state_dict(torch.load(args.model_path, map_location=device))
+    model.to(device)
     model.eval()
 
-    # Pipeline de données
-    tsfm = transforms.Compose([
-        transforms.ToTensor(),
-        transforms.Resize((args.image_size, args.image_size)),
-        transforms.Normalize(mean=[0.5, 0.5], std=[0.5, 0.5]),
-    ])
-
-    dataset = CMRxReconDataset(args.val_pair_file, transform=tsfm, length=20, limit_val=False)
-
-    if dist.get_rank() == 0:
-        logger.log(f"Taille du jeu de validation : {len(dataset)}")
-        logger.log("Lancement de l'évaluation complète...")
-
-    # Exécution de la fonction d'évaluation
-    CMR_sampling_major_vote_func(
-        batch_size=args.batch_size,
-        diffusion=diffusion,
-        model=model,
-        output_folder=args.result_dir,
-        dataset=dataset,
-        logger=logger,
-        is_inference=True,
-        vote_num=args.vote_num,
+    # Préparation des données de test
+    print("Chargement du Dataset de Validation/Test...")
+    # On met limit_val à False si besoin, ou on utilise tout le fichier de val
+    test_dataset = AlanineDipeptideChunkDataset(args.val_data)
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=args.batch_size, 
+        shuffle=False,
+        num_workers=args.workers,
+        drop_last=False
     )
 
-    if dist.get_rank() == 0:
-        logger.log(f"Évaluation terminée. Résultats disponibles dans : {args.result_dir}")
+    metrics = TrajectoryMetrics()
+
+    # Boucle d'évaluation
+    print(f"Début de l'inférence sur {len(test_dataset)} molécules (Steps d'Euler : {args.euler_steps})...")
+    
+    with torch.no_grad():
+        for b_idx, batch in enumerate(tqdm(test_loader, desc="Évaluation")):
+            gt_batch = batch["GT"].to(device)
+            cond_batch = batch["input"].to(device)
+            
+            shape = (gt_batch.shape[0], 2, gt_batch.shape[2])
+            
+            # Génération
+            pred_batch = diffusion_engine.p_sample_loop(
+                model=model,
+                shape=shape,
+                mamba_context=cond_batch,
+                device=device
+            )
+            
+            # Calcul de la Loss
+            metrics.update(gt_batch, pred_batch)
+
+            if b_idx == 0:
+                print("Génération des graphiques pour le premier batch...")
+                # On sauvegarde jusqu'à 4 graphiques
+                num_plots = min(4, gt_batch.shape[0])
+                for i in range(num_plots):
+                    # Calcule l'erreur spécifique pour CE graphe
+                    mae_specifique = circular_mae(gt_batch[i].unsqueeze(0), pred_batch[i].unsqueeze(0)).item() * (180.0/math.pi)
+
+                    plot_path = os.path.join(args.eval_dir, f"test_molecule_{i}.png")
+                    plot_trajectory(gt_batch[i], pred_batch[i], mae_specifique, plot_path)
+
+    res = metrics.compute()
+    print("\n" + "="*50)
+    print("RÉSULTATS DÉFINITIFS DE L'ÉVALUATION")
+    print("="*50)
+    print(f"Moyenne Erreur Circulaire (MAE) : {res['MAE_circ_deg']:.2f}°")
+    print(f"Moyenne Erreur Quadratique (MSE) : {res['MSE_circ']:.4f}")
+    print("="*50)
+    print(f"Graphiques sauvegardés dans : {args.eval_dir}")
+
 
 if __name__ == "__main__":
     main()

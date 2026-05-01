@@ -1,206 +1,110 @@
-"""
-Copyright (c) Facebook, Inc. and its affiliates.
-
-This source code is licensed under the MIT license found in the
-LICENSE file in the root directory of this source tree.
-"""
-
-import argparse
-import pathlib
-from argparse import ArgumentParser
-from typing import Optional
-
-import h5py
-import numpy as np
-from runstats import Statistics
-from skimage.metrics import peak_signal_noise_ratio, structural_similarity
-
-from fastmri.data import transforms
-
+import math
+import matplotlib.pyplot as plt
 import torch
-import torch.nn.functional as F
 
 
-def mse(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
-    """Compute Mean Squared Error (MSE)"""
-    return np.mean((gt - pred) ** 2)
 
-def mse_torch(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
-    return F.mse_loss(gt, pred)
-
-def nmse(gt: np.ndarray, pred: np.ndarray) -> np.ndarray:
-    """Compute Normalized Mean Squared Error (NMSE)"""
-    return np.array(np.linalg.norm(gt - pred) ** 2 / np.linalg.norm(gt) ** 2)
-
-def nmse_torch(gt: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
-    """if you use from_numpy,remember to use .astype(np.float32)"""
-    return (torch.linalg.norm(gt - pred) ** 2 / torch.linalg.norm(gt) ** 2)
-
-
-def psnr(
-    gt: np.ndarray, pred: np.ndarray, maxval: Optional[float] = None
-) -> np.ndarray:
-    """Compute Peak Signal to Noise Ratio metric (PSNR)"""
-    if maxval is None:
-        maxval = gt.max()
-    return peak_signal_noise_ratio(gt, pred, data_range=maxval)
-
-
-def ssim(
-    gt: np.ndarray, pred: np.ndarray, maxval: Optional[float] = None
-) -> np.ndarray:
-    """Compute Structural Similarity Index Metric (SSIM)"""
-    if not gt.ndim == 3:
-        raise ValueError("Unexpected number of dimensions in ground truth.")
-    if not gt.ndim == pred.ndim:
-        raise ValueError("Ground truth dimensions does not match pred.")
-
-    maxval = gt.max() if maxval is None else maxval
-
-    ssim = np.array([0])
-    for slice_num in range(gt.shape[0]):
-        ssim = ssim + structural_similarity(
-            gt[slice_num], pred[slice_num], data_range=maxval
-        )
-
-    return ssim / gt.shape[0]
-
-
-METRIC_FUNCS = dict(
-    MSE=mse,
-    NMSE=nmse,
-    PSNR=psnr,
-    SSIM=ssim,
-)
-
-
-class Metrics:
+def angular_difference(gt, pred):
     """
-    Maintains running statistics for a given collection of metrics.
+    Calcule la différence angulaire la plus courte sur le cercle.
+    Garantit que la différence entre 179° et -179° est de 2°, et non 358°.
+    Retourne un tenseur de différences comprises entre -pi et +pi.
     """
+    return (pred - gt + math.pi) % (2 * math.pi) - math.pi
 
-    def __init__(self, metric_funcs):
+def circular_mse(gt, pred):
+    """
+    Compute Circular Mean Squared Error (MSE).
+    gt et pred doivent être en radians.
+    """
+    diff = angular_difference(gt, pred)
+    return torch.mean(diff ** 2)
+
+def circular_mae(gt, pred):
+    """
+    Compute Circular Mean Absolute Error (MAE).
+    Souvent plus interprétable physiquement que la MSE (erreur moyenne en radians).
+    """
+    diff = angular_difference(gt, pred)
+    return torch.mean(torch.abs(diff))
+
+
+def plot_trajectory(gt, pred, mae_score, save_path):
+    """Génère un graphique de comparaison Vrai vs Prédit."""
+    gt_cpu = gt.cpu().numpy()
+    pred_cpu = pred.cpu().numpy()
+    
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5))
+    time_axis = range(gt_cpu.shape[1])
+
+    # Angle Phi
+    axs[0].plot(time_axis, gt_cpu[0], label="Vrai (GT)", color="#1f77b4", marker='o')
+    axs[0].plot(time_axis, pred_cpu[0], label="Prédiction Flow", color="#d62728", marker='x', linestyle='dashed')
+    axs[0].set_title("Angle Dièdre Phi (φ)")
+    axs[0].set_ylabel("Angle (Radians)")
+    axs[0].set_xlabel("Pas de temps")
+    axs[0].set_ylim(-math.pi, math.pi)
+    axs[0].legend()
+    axs[0].grid(True, alpha=0.3)
+
+    # Angle Psi
+    axs[1].plot(time_axis, gt_cpu[1], label="Vrai (GT)", color="#1f77b4", marker='o')
+    axs[1].plot(time_axis, pred_cpu[1], label="Prédiction Flow", color="#d62728", marker='x', linestyle='dashed')
+    axs[1].set_title("Angle Dièdre Psi (ψ)")
+    axs[1].set_xlabel("Pas de temps")
+    axs[1].set_ylim(-math.pi, math.pi)
+    axs[1].legend()
+    axs[1].grid(True, alpha=0.3)
+
+    fig.suptitle(f"Évaluation Flow Matching | Erreur moyenne: {mae_score:.2f}°", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+
+
+class TrajectoryMetrics:
+    """
+    Garde en mémoire les statistiques des erreurs sur l'ensemble d'une époque (Validation/Test).
+    """
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.mse_sum = 0.0
+        self.mae_sum = 0.0
+        self.count = 0
+
+    def update(self, gt, pred):
         """
-        Args:
-            metric_funcs (dict): A dict where the keys are metric names and the
-                values are Python functions for evaluating that metric.
+        Met à jour les compteurs avec un nouveau batch.
         """
-        self.metrics = {metric: Statistics() for metric in metric_funcs}
+        batch_size = gt.size(0)
+        
+        # On multiplie par le batch_size pour avoir la somme totale de l'erreur
+        self.mse_sum += circular_mse(gt, pred).item() * batch_size
+        self.mae_sum += circular_mae(gt, pred).item() * batch_size
+        self.count += batch_size
 
-    def push(self, target, recons):
-        for metric, func in METRIC_FUNCS.items():
-            self.metrics[metric].push(func(target, recons))
+    def compute(self):
+        """
+        Retourne la moyenne des métriques.
+        """
+        if self.count == 0:
+            return {"MSE_circ": 0.0, "MAE_circ_rad": 0.0, "MAE_circ_deg": 0.0}
 
-    def means(self):
-        return {metric: stat.mean() for metric, stat in self.metrics.items()}
+        mean_mse = self.mse_sum / self.count
+        mean_mae_rad = self.mae_sum / self.count
+        
+        # Conversion en degrés
+        mean_mae_deg = mean_mae_rad * (180.0 / math.pi)
 
-    def stddevs(self):
-        return {metric: stat.stddev() for metric, stat in self.metrics.items()}
+        return {
+            "MSE_circ": mean_mse,
+            "MAE_circ_rad": mean_mae_rad,
+            "MAE_circ_deg": mean_mae_deg
+        }
 
     def __repr__(self):
-        means = self.means()
-        stddevs = self.stddevs()
-        metric_names = sorted(list(means))
-        return " ".join(
-            f"{name} = {means[name]:.4g} +/- {2 * stddevs[name]:.4g}"
-            for name in metric_names
-        )
-
-
-def evaluate(args, recons_key):
-    metrics = Metrics(METRIC_FUNCS)
-
-    for tgt_file in args.target_path.iterdir():
-        with h5py.File(tgt_file, "r") as target, h5py.File(
-            args.predictions_path / tgt_file.name, "r"
-        ) as recons:
-            if args.acquisition and args.acquisition != target.attrs["acquisition"]:
-                continue
-
-            if args.acceleration and target.attrs["acceleration"] != args.acceleration:
-                continue
-
-            target = target[recons_key][()]
-            recons = recons["reconstruction"][()]
-            target = transforms.center_crop(
-                target, (target.shape[-1], target.shape[-1])
-            )
-            recons = transforms.center_crop(
-                recons, (target.shape[-1], target.shape[-1])
-            )
-            metrics.push(target, recons)
-
-    return metrics
-
-
-if __name__ == "__main__":
-
-    input = torch.normal(0,1, size=(1,1,224,448))
-    gt = torch.normal(0,1, size=(1,1,224,448))
-
-    mse_t = mse_torch(gt, input)
-    mse_ = mse_t.numpy()
-
-    input_np = input.numpy()
-    gt_np = gt.numpy()
-    mse_np = mse(gt_np, input_np)
-
-    nmse_np = nmse(gt_np, input_np)
-
-    print(mse_ - mse_np)
-    print(nmse_np)
-
-    input = np.array([0,1,1,1,0,0])
-    input_gt = np.array([0,1,1,1,1,0])
-    nmse_np = nmse(input, input_gt)
-    mse_np = mse(input, input_gt)
-    print(nmse_np)
-    print(mse_np)
-    input = torch.from_numpy(input.astype(np.float32))
-    input_gt = torch.from_numpy(input_gt.astype(np.float32))
-    nmse_ = nmse_torch(input, input_gt, "alg1")
-    print(nmse_)
-
-
-    # parser = ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    # parser.add_argument(
-    #     "--target-path",
-    #     type=pathlib.Path,
-    #     required=True,
-    #     help="Path to the ground truth data",
-    # )
-    # parser.add_argument(
-    #     "--predictions-path",
-    #     type=pathlib.Path,
-    #     required=True,
-    #     help="Path to reconstructions",
-    # )
-    # parser.add_argument(
-    #     "--challenge",
-    #     choices=["singlecoil", "multicoil"],
-    #     required=True,
-    #     help="Which challenge",
-    # )
-    # parser.add_argument("--acceleration", type=int, default=None)
-    # parser.add_argument(
-    #     "--acquisition",
-    #     choices=[
-    #         "CORPD_FBK",
-    #         "CORPDFS_FBK",
-    #         "AXT1",
-    #         "AXT1PRE",
-    #         "AXT1POST",
-    #         "AXT2",
-    #         "AXFLAIR",
-    #     ],
-    #     default=None,
-    #     help="If set, only volumes of the specified acquisition type are used "
-    #     "for evaluation. By default, all volumes are included.",
-    # )
-    # args = parser.parse_args()
-
-    # recons_key = (
-    #     "reconstruction_rss" if args.challenge == "multicoil" else "reconstruction_esc"
-    # )
-    # metrics = evaluate(args, recons_key)
-    # print(metrics)
+        metrics = self.compute()
+        return f"Circular MSE: {metrics['MSE_circ']:.4f} | Circular MAE: {metrics['MAE_circ_deg']:.2f}°"

@@ -1,141 +1,71 @@
-"""
-This code started out as a PyTorch port of Maël Lecene flow models:
-
-Docstrings have been added, as well as DDIM sampling and a new collection of beta schedules.
-"""
-import enum
 import torch as th
-
+import math
 from .nn import mean_flat
 
 
 
-class LossType(enum.Enum):
-    MSE = enum.auto()  # use raw MSE loss
-    RESCALED_MSE = (
-        enum.auto()
-    )  # use raw MSE loss (with RESCALED_KL when learning variances)
-
-
-class GaussianDiffusion:
+class FlowMatchingEngine:
     """
-    Utilities for training and sampling diffusion models.
-
-    Ported directly from here, and then adapted over time to further experimentation.
-    https://github.com/hojonathanho/diffusion/blob/1e0dceb3b3495bbe19116a5e1b3596cd0706c543/diffusion_tf/diffusion_utils_2.py#L42
-
-    :param betas: a 1-D numpy array of betas for each diffusion timestep,
-                  starting at T and going to 1.
-    :param model_mean_type: a ModelMeanType determining what the model outputs.
-    :param model_var_type: a ModelVarType determining how variance is output.
-    :param loss_type: a LossType determining the loss function to use.
-    :param rescale_timesteps: if True, pass floating point timesteps into the
-                              model so that they are always scaled like in the
-                              original paper (0 to 1000).
+    Moteur de dynamique continue pour trajectoires angulaires (Torus Flow Matching).
+    Gère la topologie circulaire de l'Alanine dipeptide.
     """
+    def __init__(self, euler_steps=20):
+        self.euler_steps = euler_steps
 
-    def __init__(
-        self,
-        *,
-        loss_type,
-        num_timesteps,
-        rescale_timesteps=False,
-    ):
-        self.loss_type = loss_type
-        self.rescale_timesteps = rescale_timesteps
-        self.num_timesteps = num_timesteps
-
-
-    def q_sample(self, x_start, t, noise=None):
+    def _map_to_sincos(self, x):
         """
-        Diffuse the data for a given number of diffusion steps.
-
-        In other words, sample from q(x_t | x_0).
-
-        :param x_start: the initial data batch.
-        :param t: the number of diffusion steps (minus 1). Here, 0 means one step.
-        :param noise: if specified, the split-out normal noise.
-        :return: A noisy version of x_start.
+        [Astuce Topologique]
+        Transforme les angles [Batch, 2, Longueur] en [Batch, 4, Longueur]
+        (sin(phi), cos(phi), sin(psi), cos(psi)) pour aider le réseau.
         """
-        if noise is None:
-            noise = th.randn_like(x_start)
-        assert noise.shape == x_start.shape
-        t = (t.float() / self.num_timesteps).view(-1, 1, 1, 1)
+        return th.cat([th.sin(x), th.cos(x)], dim=1)
 
-        return t * x_start + (1-t) * noise
-
-    def _scale_timesteps(self, t):
-        if self.rescale_timesteps:
-            return t.float() * (1000.0 / self.num_timesteps)
-        return t
-
-    def p_sample(
-        self, model, x, t, clip_denoised=True, denoised_fn=None, model_kwargs=None
-    ):
+    def _get_target_velocity(self, x_start, noise):
         """
-        Sample x_{t-1} from the model at the given timestep.
-
-        :param model: the model to sample from.
-        :param x: the current tensor at x_{t-1}.
-        :param t: the value of t, starting at 0 for the first diffusion step.
-        :param clip_denoised: if True, clip the x_start prediction to [-1, 1].
-        :param denoised_fn: if not None, a function which applies to the
-            x_start prediction before it is used to sample.
-        :param model_kwargs: if not None, a dict of extra keyword arguments to
-            pass to the model. This can be used for conditioning.
-        :return: a dict containing the following keys:
-                 - 'sample': a random sample from the model.
-                 - 'pred_xstart': a prediction of x_0.
+        Calcule la "vitesse" cible (le plus court chemin sur le cercle).
+        Résultat toujours compris entre -pi et +pi.
         """
-        dt = 1.0 / self.num_timesteps
+        return (x_start - noise + math.pi) % (2 * math.pi) - math.pi
 
-        # Le modèle prédit la vélocité (la direction vers l'image claire)
-        vitesse = model(x, self._scale_timesteps(t), **model_kwargs)
+    def q_sample(self, x_start, t, noise):
+        """
+        Génère l'état intermédiaire x_t sur la géodésique (la ligne droite du cercle).
+        Retourne l'état x_t ET la vélocité cible pour optimiser les calculs.
+        """
+        v_target = self._get_target_velocity(x_start, noise)
+        t_expand = t.view(-1, 1, 1) # Alignement des dimensions: [Batch, 1, 1]
 
-        # Méthode d'Euler : on avance l'image d'un pas sur la ligne droite
-        sample = x + vitesse * dt
+        # On avance sur le cercle en partant du bruit
+        x_t = (noise + t_expand * v_target + math.pi) % (2 * math.pi) - math.pi
+        return x_t, v_target
 
-        # On retourne uniquement l'échantillon
+    def p_sample(self, model, x, t, mamba_context):
+        """
+        Avance la trajectoire d'un pas dt lors de l'inférence.
+        """
+        dt = 1.0 / self.euler_steps
+        x_mapped = self._map_to_sincos(x)
+
+        # Le modèle prédit la vitesse angulaire (2 canaux)
+        v_pred = model(x_mapped, t, mamba_context)
+        # Intégration d'Euler sur le cercle
+        sample = (x + v_pred * dt + math.pi) % (2 * math.pi) - math.pi
+
         return {"sample": sample}
 
     def p_sample_loop(
         self,
         model,
         shape,
+        mamba_context,
         noise=None,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
         device=None,
         progress=False,
     ):
-        """
-        Generate samples from the model.
-
-        :param model: the model module.
-        :param shape: the shape of the samples, (N, C, H, W).
-        :param noise: if specified, the noise from the encoder to sample.
-                      Should be of the same shape as `shape`.
-        :param clip_denoised: if True, clip x_start predictions to [-1, 1].
-        :param denoised_fn: if not None, a function which applies to the
-            x_start prediction before it is used to sample.
-        :param model_kwargs: if not None, a dict of extra keyword arguments to
-            pass to the model. This can be used for conditioning.
-        :param device: if specified, the device to create the samples on.
-                       If not specified, use a model parameter's device.
-        :param progress: if True, show a tqdm progress bar.
-        :return: a non-differentiable batch of samples.
-        """
+        """Wrapper final pour générer la trajectoire."""
         final = None
         for sample in self.p_sample_loop_progressive(
-            model,
-            shape,
-            noise=noise,
-            clip_denoised=clip_denoised,
-            denoised_fn=denoised_fn,
-            model_kwargs=model_kwargs,
-            device=device,
-            progress=progress,
+            model, shape, mamba_context, noise, device, progress
         ):
             final = sample
         return final["sample"]
@@ -144,82 +74,67 @@ class GaussianDiffusion:
         self,
         model,
         shape,
+        mamba_context,
         noise=None,
-        clip_denoised=True,
-        denoised_fn=None,
-        model_kwargs=None,
         device=None,
         progress=False,
     ):
-        """
-        Generate samples from the model and yield intermediate samples from
-        each timestep of diffusion.
-
-        Arguments are the same as p_sample_loop().
-        Returns a generator over dicts, where each dict is the return value of
-        p_sample().
-        """
+        """Boucle d'intégration d'Euler de t=0 à t=1."""
         if device is None:
             device = next(model.parameters()).device
-        assert isinstance(shape, (tuple, list))
+
+        assert len(shape) == 3, "La shape doit être 3D : (Batch, 2, Longueur)"
+
+        # Le bruit initial sur un cercle est Uniforme [-pi, pi], pas Gaussien !
         if noise is not None:
             img = noise
         else:
-            img = th.randn(*shape).to(device=device)
-        indices = list(range(self.num_timesteps))   # Start from 0 -> 1
+            img = th.rand(*shape, device=device) * 2 * math.pi - math.pi
+
+        dt = 1.0 / self.euler_steps
+        indices = list(range(self.euler_steps))
 
         if progress:
-            # Lazy import so that we don't depend on tqdm.
             from tqdm.auto import tqdm
-
             indices = tqdm(indices)
 
         for i in indices:
-            t = th.tensor([i] * shape[0], device=device)
+            t_val = i * dt
+            t = th.tensor([t_val] * shape[0], device=device, dtype=th.float32)
+            
             with th.no_grad():
-                out = self.p_sample(
-                    model,
-                    img,
-                    t,
-                    clip_denoised=clip_denoised,
-                    denoised_fn=denoised_fn,
-                    model_kwargs=model_kwargs,
-                )
+                out = self.p_sample(model, img, t, mamba_context)
                 yield out
                 img = out["sample"]
 
-    def training_losses(self, model, x_start, t, model_kwargs=None, noise=None):
+    def training_losses(self, model, x_start, mamba_context, noise=None):
         """
-        Compute training losses for a single timestep.
+        Calcule la loss (MSE) pour l'entraînement.
+        """
+        device = x_start.device
+        batch_size = x_start.shape[0]
 
-        :param model: the model to evaluate loss on.
-        :param x_start: the [N x C x ...] tensor of inputs.
-        :param t: a batch of timestep indices.
-        :param model_kwargs: if not None, a dict of extra keyword arguments to
-            pass to the model. This can be used for conditioning.
-        :param noise: if specified, the specific Gaussian noise to try to remove.
-        :return: a dict with the key "loss" containing a tensor of shape [N].
-                 Some mean or variance settings may also have other keys.
-        """
-        if model_kwargs is None:
-            model_kwargs = {}
+        # Bruit uniforme angulaire [-pi, pi]
         if noise is None:
-            noise = th.randn_like(x_start)
+            noise = th.rand_like(x_start) * 2 * math.pi - math.pi
 
-        x_t = self.q_sample(x_start, t, noise=noise)
+        # Temps continu aléatoire
+        t = th.rand((batch_size,), device=device)
 
+        # Récupération de l'état intermédiaire ET de la vraie vitesse
+        x_t, v_target = self.q_sample(x_start, t, noise)
+
+        # Projection Sin/Cos pour le réseau
+        x_t_mapped = self._map_to_sincos(x_t)
+
+        # Prédiction de la vitesse par le réseau
+        v_pred = model(x_t_mapped, t, mamba_context)
+
+        assert v_pred.shape == v_target.shape == x_start.shape
+
+        # Loss = MSE pure dans l'espace des vitesses (espace tangent)
         terms = {}
-
-        if self.loss_type == LossType.MSE or self.loss_type == LossType.RESCALED_MSE:
-            model_output = model(x_t, self._scale_timesteps(t), **model_kwargs)
-            # print(model_output.shape)
-            # print("hiiii")
-            target = x_start - noise
-            assert model_output.shape == target.shape == x_start.shape
-            terms["mse"] = mean_flat((target - model_output) ** 2)
-            terms["sum"] = (target - model_output).pow(2).sum(dim=(1, 2, 3))
-            terms["loss"] = terms["mse"]
-        else:
-            raise NotImplementedError(self.loss_type)
+        terms["mse"] = mean_flat((v_target - v_pred) ** 2)
+        terms["loss"] = terms["mse"]
 
         return terms

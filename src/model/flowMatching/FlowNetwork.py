@@ -6,8 +6,6 @@ import numpy as np
 import torch as th
 import torch.nn as nn
 import torch.nn.functional as F
-
-from .fp16_util import convert_module_to_f16, convert_module_to_f32
 from .nn import (
     SiLU,
     conv_nd,
@@ -17,6 +15,7 @@ from .nn import (
     timestep_embedding,
     checkpoint,
 )
+
 
 
 class TimestepBlock(nn.Module):
@@ -65,13 +64,13 @@ class ResBlock1D(TimestepBlock):
             SiLU(),
             conv_nd(1, channels, channels, 3, padding=1),
         )
-        
+
         # Projection du "Super Contexte" (Temps + Mamba) pour FiLM
         self.emb_layers = nn.Sequential(
             SiLU(),
             linear(emb_channels, 2 * channels), # Scale & Shift
         )
-        
+
         self.out_layers = nn.Sequential(
             normalization(channels),
             SiLU(),
@@ -96,7 +95,7 @@ class ResBlock1D(TimestepBlock):
         # Application du Scale and Shift (FiLM)
         scale, shift = th.chunk(emb_out, 2, dim=1)
         h = h * (1 + scale) + shift
-        
+
         h = self.out_layers(h)
         return x + h
 
@@ -176,7 +175,8 @@ class QKVAttention(nn.Module):
 class FlowNetwork1D(nn.Module):
     def __init__(
         self,
-        in_channels=2,
+        in_channels=4,
+        out_channels=2,
         model_channels=128,
         num_blocks=4,
         mamba_dim=256,
@@ -186,7 +186,7 @@ class FlowNetwork1D(nn.Module):
         super().__init__()
         self.model_channels = model_channels
 
-        # 1. Embedding du Temps d'intégration (tau)
+        # Embedding du Temps d'intégration (tau)
         time_embed_dim = model_channels * 4
         self.time_embed = nn.Sequential(
             linear(model_channels, time_embed_dim),
@@ -197,10 +197,10 @@ class FlowNetwork1D(nn.Module):
         # Dimension totale du conditionnement (Temps + Mamba)
         self.cond_dim = time_embed_dim + mamba_dim
 
-        # 2. Projection initiale
+        # Projection initiale (Accepte les 4 canaux)
         self.input_proj = conv_nd(1, in_channels, model_channels, 3, padding=1)
 
-        # 3. Empilement de blocs plats (sans changement de résolution)
+        # Empilement de blocs plats (sans changement de résolution)
         self.blocks = nn.ModuleList()
         for _ in range(num_blocks):
             self.blocks.append(
@@ -210,20 +210,20 @@ class FlowNetwork1D(nn.Module):
                 AttentionBlock1D(model_channels, num_heads=4, use_checkpoint=use_checkpoint)
             )
 
-        # 4. Tête de sortie (Prédiction de la vélocité v_t)
+        # Tête de sortie (Prédiction de la vélocité v_t sur 2 canaux)
         self.out = nn.Sequential(
             normalization(model_channels),
             SiLU(),
-            zero_module(conv_nd(1, model_channels, in_channels, 3, padding=1)),
+            zero_module(conv_nd(1, model_channels, out_channels, 3, padding=1)),
         )
 
     def forward(self, x, t, mamba_context):
         """
-        x: [Batch, 2, 16] - Trajectoire bruitée
+        x: [Batch, 4, 16] - Trajectoire projetée en Sin/Cos
         t: [Batch] - Temps d'intégration flow matching
         mamba_context: [Batch, 256] - Résumé de l'historique
         """
-        # Embedding du temps (identique à ton code actuel)
+        # Embedding du temps 
         t_emb = self.time_embed(timestep_embedding(t, self.model_channels))
 
         # Fusion du conditionnement (Super Contexte)
