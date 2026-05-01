@@ -13,6 +13,7 @@ def get_shared_parser():
     group_sys.add_argument("--model_path", type=str, default="", help="Chemin vers le modèle (.pt) pour l'inférence")
     group_sys.add_argument("--eval_dir", type=str, default="./eval_results/", help="Dossier de sortie pour les tests")
     group_sys.add_argument("-w", "--workers", type=int, default=min(max(2, multiprocessing.cpu_count() - 1), 4))
+    group_sys.add_argument("-gpu", type=int, default=0, help="Gpu d'entrainement (default=0)")
 
     group_train = parser.add_argument_group("Entraînement")
     group_train.add_argument("--batch_size", type=int, default=64)

@@ -22,12 +22,12 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
 
     if torch.cuda.is_available():
-        device = torch.device("cuda")
+        device = torch.device(f"cuda:{args.gpu}")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
     else:
         device = torch.device("cpu")
-        
+
     print(f"Lancement de l'entraînement sur : {device}")
 
     # Création du Cerveau et du Moteur
