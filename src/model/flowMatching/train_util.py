@@ -3,9 +3,7 @@ import torch as th
 from tqdm import tqdm
 from torch.optim import AdamW
 
-from . import dist_util
-from .metrics import TrajectoryMetrics
-from .Evaluation import plot_trajectory
+from .Evaluation import plot_trajectory, TrajectoryMetrics
 
 
 
@@ -14,9 +12,10 @@ class TrainLoop:
         self,
         *,
         model,
+        device,
         diffusion,
         data,
-        val_dataset,
+        val_loader,
         batch_size,
         microbatch,
         lr,
@@ -29,7 +28,7 @@ class TrainLoop:
         self.model = model
         self.diffusion = diffusion
         self.data = data
-        self.val_dataset = val_dataset
+        self.val_loader = val_loader
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
         self.lr = lr
@@ -38,7 +37,7 @@ class TrainLoop:
         self.euler_steps = euler_steps
 
         self.step = 0
-        self.device = dist_util.dev()
+        self.device = device
         self.model.to(self.device)
 
         self.opt = AdamW(self.model.parameters(), lr=self.lr, weight_decay=weight_decay)
@@ -115,7 +114,7 @@ class TrainLoop:
         self.diffusion.euler_steps = self.euler_steps
 
         # On prend un batch de validation
-        val_data = next(iter(self.val_dataset))
+        val_data = next(iter(self.val_loader))
         gt_batch = val_data["GT"].to(self.device)
         cond_batch = val_data["input"].to(self.device)
 

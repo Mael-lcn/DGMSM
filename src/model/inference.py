@@ -56,7 +56,7 @@ def main():
     # Préparation des données de test
     print("Chargement du Dataset de Validation/Test...")
     # On met limit_val à False si besoin, ou on utilise tout le fichier de val
-    test_dataset = AlanineDipeptideChunkDataset(args.val_data)
+    test_dataset = AlanineDipeptideChunkDataset(args.test_data, args.context_length)
     test_loader = DataLoader(
         test_dataset,
         batch_size=args.batch_size, 
@@ -84,7 +84,7 @@ def main():
                 mamba_context=cond_batch,
                 device=device
             )
-            
+
             # Calcul de la Loss
             metrics.update(gt_batch, pred_batch)
 

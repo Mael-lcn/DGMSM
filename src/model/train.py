@@ -46,13 +46,21 @@ def main():
 
     # Pipeline de données
     print("Chargement des trajectoires...")
-    train_dataset = AlanineDipeptideChunkDataset(args.train_data)
-    val_dataset = AlanineDipeptideChunkDataset(args.val_data)
+    train_dataset = AlanineDipeptideChunkDataset(args.train_data, args.context_length)
+    val_dataset = AlanineDipeptideChunkDataset(args.val_data, args.context_length)
 
     train_loader = DataLoader(
         train_dataset,
         batch_size=args.batch_size, 
         shuffle=True,
+        num_workers=args.workers,
+        drop_last=True
+    )
+
+    val_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size, 
+        shuffle=False,
         num_workers=args.workers,
         drop_last=True
     )
@@ -68,9 +76,10 @@ def main():
     print("Démarrage de la boucle d'entraînement...")
     loop = TrainLoop(
         model=model,
+        device=device,
         diffusion=diffusion_engine,
         data=train_gen,
-        val_dataset=val_dataset,
+        val_loader=val_loader,
         batch_size=args.batch_size,
         microbatch=args.microbatch,
         lr=args.lr,

@@ -1,7 +1,7 @@
 import torch.nn as nn
 
-from DGMSM.src.model.MambaContextEncoder import MambaContextEncoder
-from FlowNetwork import FlowNetwork1D
+from MambaContextEncoder import MambaContextEncoder
+from .FlowNetwork import FlowNetwork1D
 
 
 

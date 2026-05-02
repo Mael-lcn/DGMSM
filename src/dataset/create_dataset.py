@@ -73,6 +73,7 @@ def split_interleaved_blocks(chunks, stride, G, num_blocks=10, train_ratio=0.8, 
 
     return chunks[train_idx], chunks[val_idx], chunks[test_idx]
 
+
 def run(args):
     """
     Exécute le pipeline de transformation et de séparation des données.
@@ -100,7 +101,8 @@ def run(args):
     all_train, all_val, all_test = [], [], []
 
     for file_path in tqdm(files, desc="Traitement"):
-        data = np.load(file_path)[data.files[0]]
+        data = np.load(file_path)
+        data = data[data.files[0]]
         current_chunks = create_chunks(data, args.L, stride)
         if len(current_chunks) == 0:
             continue
@@ -148,14 +150,14 @@ def main():
     Définit les arguments de la ligne de commande et initialise le script.
     """
     parser = argparse.ArgumentParser(description="Pipeline de préparation de données de dynamique moléculaire")
-    parser.add_argument("--data", type=str, default="../../../data/*.npz", help="Chemin des fichiers sources.")
+    parser.add_argument("--data", type=str, default="../../../data/*backbone-dihedrals.npz", help="Chemin des fichiers sources.")
     parser.add_argument("--output", type=str, default="../../../output/dataset", help="Chemin du fichier de sortie.")
-    parser.add_argument('-L', type=int, default=100, help="Taille de la fenêtre temporelle.")
+    parser.add_argument('-L', type=int, default=32, help="Taille de la fenêtre temporelle.")
     parser.add_argument("-S", type=float, default=0.3, help="Ratio de stride.")
     parser.add_argument("-G", type=int, default=100, help="Gap de sécurité fixe en pas de temps.")
     parser.add_argument("--blocks", type=int, default=10, help="Nombre de blocs temporels.")
-    parser.add_argument('--train_size', type=float, default=0.8, help="Proportion pour l'entraînement.")
-    parser.add_argument('--val_size', type=float, default=0.1, help="Proportion pour la validation.")
+    parser.add_argument('--train_size', type=float, default=0.7, help="Proportion pour l'entraînement.")
+    parser.add_argument('--val_size', type=float, default=0.15, help="Proportion pour la validation.")
 
     args = parser.parse_args()
     run(args)

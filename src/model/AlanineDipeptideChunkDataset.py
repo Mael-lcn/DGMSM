@@ -56,8 +56,8 @@ class AlanineDipeptideChunkDataset(Dataset):
         item_ground_truth = chunk[self.context_length:]
 
         return {
-            "input": torch.from_numpy(item_input),
-            "ground_truth": torch.from_numpy(item_ground_truth)
+            "input": torch.from_numpy(item_input).transpose(0, 1),
+            "GT": torch.from_numpy(item_ground_truth).transpose(0, 1)
         }
 
 
