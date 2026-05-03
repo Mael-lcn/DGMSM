@@ -19,13 +19,13 @@ def get_shared_parser():
 
     group_train = parser.add_argument_group("Entraînement")
     group_train.add_argument("--batch_size", type=int, default=64)
-    group_train.add_argument("--microbatch", type=int, default=32)
+    group_train.add_argument("--microbatch", type=int, default=64)
     group_sys.add_argument("--context_length", type=int, default=16, help="Taille du contexte de la sequence")
-    group_train.add_argument("--lr", type=float, default=1e-4)
+    group_train.add_argument("--lr", type=float, default=5e-5)
     group_train.add_argument("--weight_decay", type=float, default=1e-4)
-    group_train.add_argument("--max_iter", type=int, default=100000)
-    group_train.add_argument("--log_interval", type=int, default=1000)
-    group_train.add_argument("--save_interval", type=int, default=5000)
+    group_train.add_argument("--max_iter", type=int, default=150000)
+    group_train.add_argument("--log_interval", type=int, default=5000)
+    group_train.add_argument("--save_interval", type=int, default=10000)
     group_train.add_argument("--resume_checkpoint", type=str, default="")
 
     group_model = parser.add_argument_group("Architecture")
@@ -33,6 +33,6 @@ def get_shared_parser():
     group_model.add_argument("--mamba_layers", type=int, default=4)
     group_model.add_argument("--flow_channels", type=int, default=128)
     group_model.add_argument("--flow_blocks", type=int, default=4)
-    group_model.add_argument("--euler_steps", type=int, default=20)
+    group_model.add_argument("--euler_steps", type=int, default=60)
 
     return parser

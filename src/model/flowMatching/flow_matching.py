@@ -9,7 +9,7 @@ class FlowMatchingEngine:
     Moteur de dynamique continue pour trajectoires angulaires (Torus Flow Matching).
     Gère la topologie circulaire de l'Alanine dipeptide.
     """
-    def __init__(self, euler_steps=20):
+    def __init__(self, euler_steps):
         self.euler_steps = euler_steps
 
     def _map_to_sincos(self, x):
@@ -39,11 +39,10 @@ class FlowMatchingEngine:
         x_t = (noise + t_expand * v_target + math.pi) % (2 * math.pi) - math.pi
         return x_t, v_target
 
-    def p_sample(self, model, x, t, mamba_context):
+    def p_sample(self, model, x, t, mamba_context, dt):
         """
         Avance la trajectoire d'un pas dt lors de l'inférence.
         """
-        dt = 1.0 / self.euler_steps
         x_mapped = self._map_to_sincos(x)
 
         # Le modèle prédit la vitesse angulaire (2 canaux)
@@ -91,19 +90,34 @@ class FlowMatchingEngine:
         else:
             img = th.rand(*shape, device=device) * 2 * math.pi - math.pi
 
-        dt = 1.0 / self.euler_steps
         indices = list(range(self.euler_steps))
 
         if progress:
             from tqdm.auto import tqdm
             indices = tqdm(indices)
 
+
+        power = 2.0 
+
         for i in indices:
-            t_val = i * dt
+            # Progression linéaire de 0.0 à 1.0
+            progression = i / (self.euler_steps - 1)
+
+            # Vrai t_val (commence à 0, finit à 1, ralentit à la fin)
+            t_val = 1.0 - (1.0 - progression) ** power
+
+            # Calcul du t suivant pour avoir le vrai dt
+            if i < self.euler_steps - 1:
+                next_progression = (i + 1) / (self.euler_steps - 1)
+                next_t_val = 1.0 - (1.0 - next_progression) ** power
+            else:
+                next_t_val = 1.0
+
+            dt = next_t_val - t_val
             t = th.tensor([t_val] * shape[0], device=device, dtype=th.float32)
-            
+
             with th.no_grad():
-                out = self.p_sample(model, img, t, mamba_context)
+                out = self.p_sample(model, img, t, mamba_context, dt)
                 yield out
                 img = out["sample"]
 
@@ -118,8 +132,9 @@ class FlowMatchingEngine:
         if noise is None:
             noise = th.rand_like(x_start) * 2 * math.pi - math.pi
 
-        # Temps continu aléatoire
-        t = th.rand((batch_size,), device=device)
+        # Tirage Gaussien puis écrasement entre 0 et 1 via la Sigmoïde
+        z = th.randn((batch_size,), device=device)
+        t = th.sigmoid(z)
 
         # Récupération de l'état intermédiaire ET de la vraie vitesse
         x_t, v_target = self.q_sample(x_start, t, noise)

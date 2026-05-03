@@ -58,7 +58,7 @@ def main():
     )
 
     val_loader = DataLoader(
-        train_dataset,
+        val_dataset,
         batch_size=args.batch_size, 
         shuffle=False,
         num_workers=args.workers,

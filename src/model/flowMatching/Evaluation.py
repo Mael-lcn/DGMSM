@@ -1,4 +1,6 @@
 import math
+import numpy as np
+from scipy.spatial.distance import jensenshannon
 import matplotlib.pyplot as plt
 import torch
 
@@ -61,6 +63,58 @@ def plot_trajectory(gt, pred, mae_score, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
+
+
+def compute_ramachandran_jsd(gt_cpu, pred_cpu, bins=60):
+    """
+    Calcule la Divergence de Jensen-Shannon (JSD) entre les distributions 2D
+    de Ramachandran réelles et générées. Une JSD proche de 0 est parfaite.
+    """
+    # Extraction et aplatissement des angles Phi (index 0) et Psi (index 1)
+    gt_phi, gt_psi = gt_cpu[:, 0, :].flatten(), gt_cpu[:, 1, :].flatten()
+    pred_phi, pred_psi = pred_cpu[:, 0, :].flatten(), pred_cpu[:, 1, :].flatten()
+
+    hist_range = [[-math.pi, math.pi], [-math.pi, math.pi]]
+
+    # Création des histogrammes de probabilité
+    hist_gt, _, _ = np.histogram2d(gt_phi, gt_psi, bins=bins, range=hist_range, density=True)
+    hist_pred, _, _ = np.histogram2d(pred_phi, pred_psi, bins=bins, range=hist_range, density=True)
+
+    p_gt = hist_gt.flatten()
+    p_pred = hist_pred.flatten()
+
+    # Normalisation
+    p_gt /= p_gt.sum() + 1e-10
+    p_pred /= p_pred.sum() + 1e-10
+
+    return jensenshannon(p_gt, p_pred)
+
+
+def plot_ramachandran(gt, pred, jsd_score, save_path):
+    """
+    Trace les cartes d'Énergie Libre (Ramachandran Plots).
+    """
+    gt_cpu = gt.cpu().numpy()
+    pred_cpu = pred.cpu().numpy()
+
+    gt_phi, gt_psi = gt_cpu[:, 0, :].flatten(), gt_cpu[:, 1, :].flatten()
+    pred_phi, pred_psi = pred_cpu[:, 0, :].flatten(), pred_cpu[:, 1, :].flatten()
+
+    fig, axs = plt.subplots(1, 2, figsize=(10, 5), sharex=True, sharey=True)
+
+    axs[0].hist2d(gt_phi, gt_psi, bins=60, range=[[-math.pi, math.pi], [-math.pi, math.pi]], cmap='Blues', density=True)
+    axs[0].set_title("Vrai (Ground Truth)")
+    axs[0].set_xlabel("Phi (rad)")
+    axs[0].set_ylabel("Psi (rad)")
+
+    axs[1].hist2d(pred_phi, pred_psi, bins=60, range=[[-math.pi, math.pi], [-math.pi, math.pi]], cmap='Reds', density=True)
+    axs[1].set_title("Généré (Flow Matching)")
+    axs[1].set_xlabel("Phi (rad)")
+
+    fig.suptitle(f"Ramachandran Plot | Divergence JSD : {jsd_score:.4f}", fontsize=14)
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
 
 
 class TrajectoryMetrics:
