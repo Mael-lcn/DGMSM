@@ -42,7 +42,7 @@ class MambaContextEncoder(nn.Module):
                 'norm': nn.LayerNorm(mamba_dim)
             }) for _ in range(num_mamba_layers)
         ])
-        
+
         # Tête de projection du Contexte
         self.context_head = nn.Sequential(
             nn.Linear(mamba_dim, mamba_dim),
@@ -57,8 +57,17 @@ class MambaContextEncoder(nn.Module):
         # Projection des angles
         x_features = self.input_proj(x_past)
 
-        # Transposition pour Mamba : [Batch, Longueur, Dimension]
-        hidden_states = x_features.transpose(1, 2)
+        # Transposition et alignement mémoire
+        hidden_states = x_features.transpose(1, 2).contiguous()
+
+        # Padding à un multiple de 64
+        seq_len = hidden_states.shape[1]
+        pad_len = (64 - (seq_len % 64)) % 64
+
+        if pad_len > 0:
+            # On ajoute des zéros sur la dimension temporelle
+            # Format PyTorch : (droite_dim_max, gauche_dim_max, droite_dim_milieu, gauche_dim_milieu)
+            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, pad_len))
 
         # 3. Traitement récurrent
         for layer in self.mamba_layers:
@@ -66,9 +75,12 @@ class MambaContextEncoder(nn.Module):
             mixed = layer['mixer'](layer['norm'](hidden_states))
             hidden_states = mixed + residual
 
+        # 4. On retire le padding pour retrouver la longueur d'origine
+        if pad_len > 0:
+            hidden_states = hidden_states[:, :seq_len, :].contiguous()
+
         # Global Average Pooling
         if batch_mask is not None:
-            # Gestion des historiques de tailles variables
             mask_downsampled = torch.nn.functional.interpolate(
                 batch_mask.unsqueeze(1).float(), 
                 size=hidden_states.shape[1], mode='nearest'

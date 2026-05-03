@@ -22,6 +22,7 @@ def main():
     os.makedirs(args.log_dir, exist_ok=True)
 
     if torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu)
         device = torch.device(f"cuda:{args.gpu}")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -33,7 +34,7 @@ def main():
     # Création du Cerveau et du Moteur
     print("Initialisation de l'architecture Mamba + Flow...")
     model = ConditionalFlowMolecule(
-        mamba_in_channels=2,
+        mamba_in_channels=4,
         flow_in_channels=4,
         context_dim=args.mamba_dim,
         mamba_layers=args.mamba_layers,
@@ -61,8 +62,7 @@ def main():
         val_dataset,
         batch_size=args.batch_size, 
         shuffle=False,
-        num_workers=args.workers,
-        drop_last=True
+        num_workers=args.workers
     )
 
     # Un générateur infini pour la boucle d'entraînement

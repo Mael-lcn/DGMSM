@@ -223,8 +223,8 @@ class FlowNetwork1D(nn.Module):
         t: [Batch] - Temps d'intégration flow matching
         mamba_context: [Batch, 256] - Résumé de l'historique
         """
-        # Embedding du temps 
-        t_emb = self.time_embed(timestep_embedding(t, self.model_channels))
+        # Embedding du temps: On multiplie t par 1000 pour les fréquences sinusoïdales
+        t_emb = self.time_embed(timestep_embedding(t * 1000.0, self.model_channels))
 
         # Fusion du conditionnement (Super Contexte)
         super_cond = th.cat([t_emb, mamba_context], dim=-1)

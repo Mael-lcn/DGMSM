@@ -25,6 +25,7 @@ def main():
     os.makedirs(args.eval_dir, exist_ok=True)
 
     if torch.cuda.is_available():
+        torch.cuda.set_device(args.gpu)
         device = torch.device(f"cuda:{args.gpu}")
     elif torch.backends.mps.is_available():
         device = torch.device("mps")
@@ -76,7 +77,7 @@ def main():
             cond_batch = batch["input"].to(device)
             
             shape = (gt_batch.shape[0], 2, gt_batch.shape[2])
-            
+        
             # Génération
             pred_batch = diffusion_engine.p_sample_loop(
                 model=model,

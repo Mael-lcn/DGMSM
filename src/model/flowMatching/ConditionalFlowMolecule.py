@@ -1,3 +1,4 @@
+import torch
 import torch.nn as nn
 
 from MambaContextEncoder import MambaContextEncoder
@@ -12,7 +13,7 @@ class ConditionalFlowMolecule(nn.Module):
     """
     def __init__(
         self,
-        mamba_in_channels=2,
+        mamba_in_channels=4,
         flow_in_channels=4,
         context_dim=256,
         mamba_layers=4,
@@ -37,14 +38,23 @@ class ConditionalFlowMolecule(nn.Module):
             mamba_dim=context_dim
         )
 
+    def _map_to_sincos(self, x):
+        """
+        Transforme les angles bruts (2 canaux) en coordonnées périodiques (4 canaux).
+        """
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=1)
+
     def forward(self, x_t, t, x_past, batch_mask=None):
         """
         x_t: [Batch, 2, 16] (La trajectoire bruitée à l'instant t de l'ODE)
         t: [Batch] (Le temps d'intégration Flow Matching, de 0 à 1)
-        x_past: [Batch, 2, Longueur_Passé] (L'historique de la molécule)
+        x_past: [Batch, 2, Longueur_Passé] (L'historique brut de la molécule)
         """
-        # Extraire la mémoire du passé
-        context_c = self.encoder(x_past, batch_mask)
+        # On évite à Mamba de lire les sauts discontinus de -pi à +pi
+        x_past_mapped = self._map_to_sincos(x_past)
 
-        # Prédire la dérivée temporelle pour le solveur        
+        # Extraire la mémoire du passé
+        context_c = self.encoder(x_past_mapped, batch_mask)
+
+        # Prédire la dérivée temporelle pour le solveur
         return self.vector_field(x_t, t, context_c)

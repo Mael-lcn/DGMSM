@@ -29,16 +29,17 @@ class TrainLoop:
         self.diffusion = diffusion
         self.data = data
         self.val_loader = val_loader
+        self.device = device
+
+        self.use_amp = (self.device.type == 'cuda')
+        if self.use_amp:
+            self.scaler = th.amp.GradScaler('cuda')
 
         self.train_loss_history = []
         self.val_loss_history = []
         self.val_mae_history = []
         self.val_steps = []
         self.val_jsd_history = []
-
-        self.use_amp = (self.device.type == 'cuda')
-        if self.use_amp:
-            self.scaler = th.amp.GradScaler('cuda')
 
         self.batch_size = batch_size
         self.microbatch = microbatch if microbatch > 0 else batch_size
@@ -48,7 +49,6 @@ class TrainLoop:
         self.euler_steps = euler_steps
 
         self.step = 0
-        self.device = device
         self.model.to(self.device)
 
         self.opt = AdamW(self.model.parameters(), lr=self.lr, weight_decay=weight_decay)
@@ -100,8 +100,8 @@ class TrainLoop:
 
         # On découpe le batch en micro-batchs
         for i in range(0, batch.shape[0], self.microbatch):
-            micro_batch = batch[i : i + self.microbatch]
-            micro_cond = cond[i : i + self.microbatch]
+            micro_batch = batch[i : i + self.microbatch].contiguous()
+            micro_cond = cond[i : i + self.microbatch].contiguous()
 
             with th.autocast(device_type=self.device.type, dtype=th.float16, enabled=self.use_amp):
                 losses = self.diffusion.training_losses(
@@ -114,23 +114,18 @@ class TrainLoop:
             loss = loss * (micro_batch.shape[0] / self.batch_size)
 
             step_loss_total += loss.item()
-
-            # Rétropropagation avec ou sans le Scaler FP16
             if self.use_amp:
                 self.scaler.scale(loss).backward()
             else:
                 loss.backward()
 
-            # Mise à jour des poids
         if self.use_amp:
             self.scaler.step(self.opt)
             self.scaler.update()
         else:
             self.opt.step()
-            
+
         return step_loss_total
-
-
 
     def valuate_and_plot(self):
         print(f"\n--- Validation complète sur tout le dataset au step {self.step} ---")
