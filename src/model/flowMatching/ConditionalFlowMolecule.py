@@ -18,7 +18,8 @@ class ConditionalFlowMolecule(nn.Module):
         context_dim=256,
         mamba_layers=4,
         flow_channels=128,
-        flow_blocks=4
+        flow_blocks=4,
+        dropout=0.1
     ):
         super().__init__()
 
@@ -27,7 +28,7 @@ class ConditionalFlowMolecule(nn.Module):
             in_channels=mamba_in_channels,
             mamba_dim=context_dim,
             num_mamba_layers=mamba_layers,
-            out_channels=context_dim
+            dropout=dropout
         )
 
         # Le Moteur : Prend le bruit, le temps, et le contexte C pour prédire la vélocité
@@ -35,7 +36,8 @@ class ConditionalFlowMolecule(nn.Module):
             in_channels=flow_in_channels,
             model_channels=flow_channels,
             num_blocks=flow_blocks,
-            mamba_dim=context_dim
+            mamba_dim=context_dim,
+            dropout=dropout
         )
 
     def _map_to_sincos(self, x):
@@ -44,7 +46,7 @@ class ConditionalFlowMolecule(nn.Module):
         """
         return torch.cat([torch.sin(x), torch.cos(x)], dim=1)
 
-    def forward(self, x_t, t, x_past, batch_mask=None):
+    def forward(self, x_t, t, x_past):
         """
         x_t: [Batch, 2, 16] (La trajectoire bruitée à l'instant t de l'ODE)
         t: [Batch] (Le temps d'intégration Flow Matching, de 0 à 1)
@@ -54,7 +56,7 @@ class ConditionalFlowMolecule(nn.Module):
         x_past_mapped = self._map_to_sincos(x_past)
 
         # Extraire la mémoire du passé
-        context_c = self.encoder(x_past_mapped, batch_mask)
+        context_c = self.encoder(x_past_mapped)
 
         # Prédire la dérivée temporelle pour le solveur
         return self.vector_field(x_t, t, context_c)

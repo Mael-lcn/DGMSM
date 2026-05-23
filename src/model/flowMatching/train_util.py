@@ -26,14 +26,13 @@ class TrainLoop:
         euler_steps=20
     ):
         self.model = model
+        self.grad_clip = 1.0
         self.diffusion = diffusion
         self.data = data
         self.val_loader = val_loader
         self.device = device
 
         self.use_amp = (self.device.type == 'cuda')
-        if self.use_amp:
-            self.scaler = th.amp.GradScaler('cuda')
 
         self.train_loss_history = []
         self.val_loss_history = []
@@ -51,7 +50,8 @@ class TrainLoop:
         self.step = 0
         self.model.to(self.device)
 
-        self.opt = AdamW(self.model.parameters(), lr=self.lr, weight_decay=weight_decay)
+        params = self._get_optimizer_params(model, weight_decay)
+        self.opt = AdamW(params)
 
         if resume_checkpoint:
             self._load_and_sync_parameters(resume_checkpoint)
@@ -60,6 +60,20 @@ class TrainLoop:
 
         self.log_dir = os.environ.get("OPENAI_LOGDIR", "logs")
         os.makedirs(self.log_dir, exist_ok=True)
+
+    def _get_optimizer_params(self, model, weight_decay):
+        no_decay = ["bias", "LayerNorm.weight", "GroupNorm.weight"]
+        optimizer_grouped_parameters = [
+            {
+                "params": [p for n, p in model.named_parameters() if not any(nd in n for nd in no_decay)],
+                "weight_decay": weight_decay,
+            },
+            {
+                "params": [p for n, p in model.named_parameters() if any(nd in n for nd in no_decay)],
+                "weight_decay": 0.0,
+            },
+        ]
+        return optimizer_grouped_parameters
 
     def _load_and_sync_parameters(self, checkpoint_path):
         print(f"Chargement du modèle depuis {checkpoint_path}...")
@@ -92,38 +106,24 @@ class TrainLoop:
             self.step += 1
 
     def run_step(self, batch, cond):
-        """
-        Gère l'entraînement avec le MICROBATCHING (Accumulation de gradients)
-        """
         self.opt.zero_grad()
         step_loss_total = 0.0
 
-        # On découpe le batch en micro-batchs
+        # Accumulation des gradients
         for i in range(0, batch.shape[0], self.microbatch):
             micro_batch = batch[i : i + self.microbatch].contiguous()
             micro_cond = cond[i : i + self.microbatch].contiguous()
 
-            with th.autocast(device_type=self.device.type, dtype=th.float16, enabled=self.use_amp):
-                losses = self.diffusion.training_losses(
-                    model=self.model, 
-                    x_start=micro_batch, 
-                    mamba_context=micro_cond
-                )
+            with th.autocast(device_type=self.device.type, dtype=th.bfloat16, enabled=self.use_amp):
+                losses = self.diffusion.training_losses(model=self.model, x_start=micro_batch, mamba_context=micro_cond)
+                loss = losses["loss"].mean() / (batch.shape[0] / self.microbatch)
 
-            loss = losses["loss"].mean()
-            loss = loss * (micro_batch.shape[0] / self.batch_size)
-
+            loss.backward()
             step_loss_total += loss.item()
-            if self.use_amp:
-                self.scaler.scale(loss).backward()
-            else:
-                loss.backward()
 
-        if self.use_amp:
-            self.scaler.step(self.opt)
-            self.scaler.update()
-        else:
-            self.opt.step()
+        # Le step et le clipping restent à l'extérieur
+        th.nn.utils.clip_grad_norm_(self.model.parameters(), self.grad_clip)
+        self.opt.step()
 
         return step_loss_total
 

@@ -7,6 +7,41 @@ from tqdm import tqdm
 
 
 
+def autocorr_fft(x):
+    """
+    Calcule la fonction d'autocorrélation normalisée C(tau) via FFT.
+    x : numpy array 1D (la trajectoire d'une seule caractéristique)
+    """
+    # 1. Centrer la donnée (x - mu)
+    x_centered = x - np.mean(x)
+    n = len(x)
+
+    # 2. Zero-padding
+    f = np.fft.fft(x_centered, n=2*n)
+
+    # 3. Théorème de Wiener-Khinchin : l'autocorrélation est la transformée 
+    # de Fourier inverse du spectre de puissance
+    power_spectrum = f * np.conjugate(f)
+    acf = np.fft.ifft(power_spectrum)[:n].real
+
+    # 4. Normalisation pour que C(0) = 1
+    return acf / acf[0]
+
+def compute_tau_int(acf):
+    """
+    Intègre C(tau) pour obtenir le temps de décorrélation.
+    """
+    tau_int = 0.5  # Convention en physique
+
+    # On somme C(tau)
+    for c in acf[1:]:
+        if c <= 0:
+            break
+        tau_int += c
+
+    return tau_int
+
+
 def create_chunks(seq, L, S):
     """
     Divise une séquence en fenêtres glissantes de taille fixe.
@@ -97,26 +132,56 @@ def run(args):
         print(f"Aucune donnée trouvée au chemin : {args.data}")
         return
 
-    stride = max(1, int(round(args.L * args.S)))
     all_train, all_val, all_test = [], [], []
 
     for file_path in tqdm(files, desc="Traitement"):
-        data = np.load(file_path)
-        data = data[data.files[0]]
-        current_chunks = create_chunks(data, args.L, stride)
-        if len(current_chunks) == 0:
-            continue
+        with np.load(file_path) as npz_file:
+            for key in npz_file.files:
+                data = npz_file[key]
 
-        train_c, val_c, test_c = split_interleaved_blocks(
-            current_chunks, stride, args.G, 
-            num_blocks=args.blocks, 
-            train_ratio=args.train_size, 
-            val_ratio=args.val_size
-        )
+                max_tau_int = 0
 
-        if len(train_c) > 0: all_train.append(train_c)
-        if len(val_c) > 0: all_val.append(val_c)
-        if len(test_c) > 0: all_test.append(test_c)
+                for dim in range(data.shape[1]):
+                    obs_sin = np.sin(data[:, dim])
+                    obs_cos = np.cos(data[:, dim])
+
+                    # On calcule les deux autocorrélations
+                    acf_sin = autocorr_fft(obs_sin)
+                    acf_cos = autocorr_fft(obs_cos)
+
+                    # L'autocorrélation circulaire totale est la moyenne des deux
+                    acf_totale = (acf_sin + acf_cos) / 2.0
+
+                    tau_int_dim = compute_tau_int(acf_totale)
+
+                    # On garde le temps le plus long pour être sûr que tout est décorrelé
+                    if tau_int_dim > max_tau_int:
+                        max_tau_int = tau_int_dim
+
+                print(f"[{key}] Temps de décorrélation max : {max_tau_int:.2f} pas")
+
+                optimal_stride = max(1, int(max_tau_int / 10))
+                optimal_gap = int(2 * max_tau_int) 
+
+                print(f"-> Utilise un stride (S) de {optimal_stride}")
+                print(f"-> Utilise un gap (G) de {optimal_gap}")
+
+                current_chunks = create_chunks(data, args.L, optimal_stride)
+                if len(current_chunks) == 0:
+                    continue
+
+                train_c, val_c, test_c = split_interleaved_blocks(
+                    current_chunks, 
+                    optimal_stride, 
+                    optimal_gap, 
+                    num_blocks=args.blocks, 
+                    train_ratio=args.train_size, 
+                    val_ratio=args.val_size
+                )
+
+                if len(train_c) > 0: all_train.append(train_c)
+                if len(val_c) > 0: all_val.append(val_c)
+                if len(test_c) > 0: all_test.append(test_c)
 
     if not all_train:
         print("Échec de la génération : aucun échantillon valide produit.")
@@ -127,8 +192,8 @@ def run(args):
     x_test = np.vstack(all_test) if all_test else np.array([])
 
     np.random.shuffle(x_train)
-    #np.random.shuffle(x_val)
-    #np.random.shuffle(x_test)
+    np.random.shuffle(x_val)
+    np.random.shuffle(x_test)
 
     print(f"Taille de x_train : {len(x_train)}")
     print(f"Taille de x_val   : {len(x_val)}")
@@ -153,8 +218,6 @@ def main():
     parser.add_argument("--data", type=str, default="../../../data/*backbone-dihedrals.npz", help="Chemin des fichiers sources.")
     parser.add_argument("--output", type=str, default="../../../output/dataset", help="Chemin du fichier de sortie.")
     parser.add_argument('-L', type=int, default=32, help="Taille de la fenêtre temporelle.")
-    parser.add_argument("-S", type=float, default=0.3, help="Ratio de stride.")
-    parser.add_argument("-G", type=int, default=100, help="Gap de sécurité fixe en pas de temps.")
     parser.add_argument("--blocks", type=int, default=10, help="Nombre de blocs temporels.")
     parser.add_argument('--train_size', type=float, default=0.7, help="Proportion pour l'entraînement.")
     parser.add_argument('--val_size', type=float, default=0.15, help="Proportion pour la validation.")

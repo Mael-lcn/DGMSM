@@ -5,7 +5,6 @@ import math
 import numpy as np
 import torch as th
 import torch.nn as nn
-import torch.nn.functional as F
 from .nn import (
     SiLU,
     conv_nd,
@@ -46,37 +45,28 @@ class TimestepEmbedSequential(nn.Sequential, TimestepBlock):
 
 
 class ResBlock1D(TimestepBlock):
-    def __init__(
-        self,
-        channels,
-        emb_channels,
-        dropout=0.0,
-        use_checkpoint=False,
-    ):
+    def __init__(self, channels, emb_channels, dropout=0.1, use_checkpoint=False):
         super().__init__()
-        self.channels = channels
-        self.emb_channels = emb_channels
         self.use_checkpoint = use_checkpoint
 
-        # Couches de traitement de la trajectoire (1D)
         self.in_layers = nn.Sequential(
-            normalization(channels),
-            SiLU(),
-            conv_nd(1, channels, channels, 3, padding=1),
+            nn.GroupNorm(8, channels),
+            nn.SiLU(),
+            nn.Conv1d(channels, channels, 3, padding=1),
         )
-
-        # Projection du "Super Contexte" (Temps + Mamba) pour FiLM
         self.emb_layers = nn.Sequential(
-            SiLU(),
-            linear(emb_channels, 2 * channels), # Scale & Shift
+            nn.SiLU(),
+            nn.Linear(emb_channels, 2 * channels),
         )
-
         self.out_layers = nn.Sequential(
-            normalization(channels),
-            SiLU(),
+            nn.GroupNorm(8, channels),
+            nn.SiLU(),
             nn.Dropout(p=dropout),
-            zero_module(conv_nd(1, channels, channels, 3, padding=1)),
+            nn.Conv1d(channels, channels, 3, padding=1)
         )
+        # Initialisation à zéro de la dernière conv pour un démarrage neutre
+        nn.init.zeros_(self.out_layers[-1].weight)
+        nn.init.zeros_(self.out_layers[-1].bias)
 
     def forward(self, x, emb):
         """
@@ -236,5 +226,5 @@ class FlowNetwork1D(nn.Module):
                 h = block(h, super_cond)
             else:
                 h = block(h)
-        
+
         return self.out(h)
