@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from MambaContextEncoder import MambaContextEncoder
 from .FlowNetwork import FlowNetwork1D
+from .Dit import DiT1D
 
 
 
@@ -31,6 +32,16 @@ class ConditionalFlowMolecule(nn.Module):
             dropout=dropout
         )
 
+        self.vector_field = DiT1D(
+            in_channels=flow_in_channels,
+            out_channels=2, # On ressort bien sur 2 canaux (phi, psi)
+            hidden_dim=context_dim, # On aligne avec la dimension de Mamba
+            num_blocks=flow_blocks,
+            num_heads=4,
+            dropout=dropout
+        )
+
+        """
         # Le Moteur : Prend le bruit, le temps, et le contexte C pour prédire la vélocité
         self.vector_field = FlowNetwork1D(
             in_channels=flow_in_channels,
@@ -39,6 +50,7 @@ class ConditionalFlowMolecule(nn.Module):
             mamba_dim=context_dim,
             dropout=dropout
         )
+        """
 
     def _map_to_sincos(self, x):
         """

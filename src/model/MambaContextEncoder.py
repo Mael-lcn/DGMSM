@@ -1,7 +1,19 @@
+import math
 import torch
 import torch.nn as nn
 from mamba_ssm import Mamba2
 
+
+
+def get_1d_sincos_pos_embed(embed_dim, length):
+    """Génère l'encodage positionnel sinusoïdal"""
+    pos = torch.arange(length, dtype=torch.float32)
+    omega = torch.exp(torch.arange(0, embed_dim, 2, dtype=torch.float32) * -(math.log(10000.0) / embed_dim))
+    out = torch.einsum('m,d->md', pos, omega)
+    emb_sin = torch.sin(out)
+    emb_cos = torch.cos(out)
+    pos_emb = torch.cat([emb_sin, emb_cos], dim=1)
+    return pos_emb # Shape: [length, embed_dim]
 
 
 class MambaContextEncoder(nn.Module):
@@ -17,6 +29,10 @@ class MambaContextEncoder(nn.Module):
             nn.GELU(),
             nn.GroupNorm(8, mamba_dim)
         )
+
+        max_len = 128
+        pos_emb = get_1d_sincos_pos_embed(mamba_dim, max_len).unsqueeze(0) # [1, max_len, D]
+        self.register_buffer("pos_embedding", pos_emb)
 
         self.mamba_layers = nn.ModuleList([
             nn.ModuleDict({
@@ -41,6 +57,9 @@ class MambaContextEncoder(nn.Module):
         h = self.input_proj(x_past)
         h = h.transpose(1, 2).contiguous() # [B, L, D]
 
+        seq_len = h.shape[1]
+        h = h + self.pos_embedding[:, :seq_len, :]
+
         for layer in self.mamba_layers:
             residual = h
             h = layer['norm'](h)
@@ -48,5 +67,9 @@ class MambaContextEncoder(nn.Module):
             h = layer['dropout'](h)
             h = h + residual
 
-        final_rep = h[:, -1, :] 
-        return self.context_head(torch.nn.functional.layer_norm(final_rep, final_rep.shape[1:]))
+        h_norm = torch.nn.functional.layer_norm(h, [h.shape[-1]])
+
+        # Le réseau dense traite chaque élément de la séquence indépendamment
+        full_context = self.context_head(h_norm) 
+
+        return full_context # Shape de retour : [Batch, Length, mamba_dim]
