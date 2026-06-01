@@ -34,7 +34,7 @@ class ConditionalFlowMolecule(nn.Module):
 
         self.vector_field = DiT1D(
             in_channels=flow_in_channels,
-            out_channels=2, # On ressort bien sur 2 canaux (phi, psi)
+            out_channels=2,     # On ressort bien sur 2 canaux (phi, psi)
             hidden_dim=context_dim, # On aligne avec la dimension de Mamba
             num_blocks=flow_blocks,
             num_heads=4,

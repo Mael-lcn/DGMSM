@@ -48,7 +48,7 @@ def main():
     # Pipeline de données
     print("Chargement des trajectoires...")
     train_dataset = AlanineDipeptideChunkDataset(args.train_data, args.context_length)
-    val_dataset = AlanineDipeptideChunkDataset(args.val_data, args.context_length)
+    val_dataset = AlanineDipeptideChunkDataset(args.val_data, args.context_length, training=False)
 
     train_loader = DataLoader(
         train_dataset,
