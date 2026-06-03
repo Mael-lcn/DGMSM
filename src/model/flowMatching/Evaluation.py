@@ -5,6 +5,7 @@ import matplotlib.pyplot as plt
 import torch
 
 import deeptime.markov as markov
+import deeptime.plots as dtplots
 
 
 
@@ -17,24 +18,17 @@ def angular_difference(gt, pred):
     return (pred - gt + math.pi) % (2 * math.pi) - math.pi
 
 def circular_mse(gt, pred):
-    """
-    Compute Circular Mean Squared Error (MSE).
-    gt et pred doivent être en radians.
-    """
+    """Compute Circular Mean Squared Error (MSE)."""
     diff = angular_difference(gt, pred)
     return torch.mean(diff ** 2)
 
 def circular_mae(gt, pred):
-    """
-    Compute Circular Mean Absolute Error (MAE).
-    Souvent plus interprétable physiquement que la MSE (erreur moyenne en radians).
-    """
+    """Compute Circular Mean Absolute Error (MAE)."""
     diff = angular_difference(gt, pred)
     return torch.mean(torch.abs(diff))
 
-
 def plot_trajectory(gt, pred, mae_score, save_path):
-    """Génère un graphique de comparaison Vrai vs Prédit."""
+    """Génère un graphique de comparaison temporel Vrai vs Prédit."""
     gt_cpu = gt.cpu().numpy()
     pred_cpu = pred.cpu().numpy()
     
@@ -65,37 +59,61 @@ def plot_trajectory(gt, pred, mae_score, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
+class TrajectoryMetrics:
+    """
+    Calcule les statistiques d'erreurs (MSE/MAE) UNIQUEMENT sur le court-terme 
+    (ex: les 3 premiers pas) pour éviter la divergence chaotique naturelle.
+    """
+    def __init__(self, max_eval_steps=3):
+        self.max_eval_steps = max_eval_steps
+        self.reset()
 
+    def reset(self):
+        self.mse_sum = 0.0
+        self.mae_sum = 0.0
+        self.count = 0
+
+    def update(self, gt, pred):
+        # On ne prend que les 'max_eval_steps' premiers pas !
+        steps = min(self.max_eval_steps, gt.shape[2])
+        gt_short = gt[:, :, :steps]
+        pred_short = pred[:, :, :steps]
+        
+        batch_size = gt.size(0)
+        self.mse_sum += circular_mse(gt_short, pred_short).item() * batch_size
+        self.mae_sum += circular_mae(gt_short, pred_short).item() * batch_size
+        self.count += batch_size
+
+    def compute(self):
+        if self.count == 0: return {}
+        mean_mae_rad = self.mae_sum / self.count
+        return {
+            "MSE_circ": self.mse_sum / self.count,
+            "MAE_circ_deg": mean_mae_rad * (180.0 / math.pi)
+        }
+
+# =====================================================================
+# 2. MÉTRIQUES THERMODYNAMIQUES (STATIQUE / ÉQUILIBRE)
+# =====================================================================
 
 def compute_ramachandran_jsd(gt_cpu, pred_cpu, bins=60):
-    """
-    Calcule la Divergence de Jensen-Shannon (JSD) entre les distributions 2D
-    de Ramachandran réelles et générées. Une JSD proche de 0 est parfaite.
-    """
-    # Extraction et aplatissement des angles Phi (index 0) et Psi (index 1)
+    """Calcule la Divergence de Jensen-Shannon (JSD) sur les Ramachandran."""
     gt_phi, gt_psi = gt_cpu[:, 0, :].flatten(), gt_cpu[:, 1, :].flatten()
     pred_phi, pred_psi = pred_cpu[:, 0, :].flatten(), pred_cpu[:, 1, :].flatten()
 
     hist_range = [[-math.pi, math.pi], [-math.pi, math.pi]]
-
-    # Création des histogrammes de probabilité
     hist_gt, _, _ = np.histogram2d(gt_phi, gt_psi, bins=bins, range=hist_range, density=True)
     hist_pred, _, _ = np.histogram2d(pred_phi, pred_psi, bins=bins, range=hist_range, density=True)
 
     p_gt = hist_gt.flatten()
     p_pred = hist_pred.flatten()
-
-    # Normalisation
     p_gt /= p_gt.sum() + 1e-10
     p_pred /= p_pred.sum() + 1e-10
 
     return jensenshannon(p_gt, p_pred)
 
-
 def plot_ramachandran(gt, pred, jsd_score, save_path):
-    """
-    Trace les cartes d'Énergie Libre (Ramachandran Plots).
-    """
+    """Trace les cartes d'Énergie Libre 2D (Ramachandran Plots)."""
     gt_cpu = gt.cpu().numpy()
     pred_cpu = pred.cpu().numpy()
 
@@ -118,72 +136,67 @@ def plot_ramachandran(gt, pred, jsd_score, save_path):
     plt.savefig(save_path, dpi=150)
     plt.close()
 
-
-
-class TrajectoryMetrics:
+def plot_1d_free_energy(gt_cpu, pred_cpu, save_path, bins=100):
     """
-    Calcule les statistiques d'erreurs (MSE/MAE) UNIQUEMENT sur le court-terme 
-    pour éviter la divergence chaotique.
+    Trace les profils d'Énergie Libre 1D le long de Phi et Psi.
+    (Inspiré de Shen et al. 2025 pour voir la hauteur des barrières d'énergie).
     """
-    def __init__(self, max_eval_steps=3):
-        self.max_eval_steps = max_eval_steps
-        self.reset()
+    gt_phi, gt_psi = gt_cpu[:, 0, :].flatten(), gt_cpu[:, 1, :].flatten()
+    pred_phi, pred_psi = pred_cpu[:, 0, :].flatten(), pred_cpu[:, 1, :].flatten()
 
-    def reset(self):
-        self.mse_sum = 0.0
-        self.mae_sum = 0.0
-        self.count = 0
-
-    def update(self, gt, pred):
-        # On ne prend que les 'max_eval_steps' premiers pas pour la MSE/MAE !
-        # Shape attendue: (Batch, 2, L)
-        steps = min(self.max_eval_steps, gt.shape[2])
-        gt_short = gt[:, :, :steps]
-        pred_short = pred[:, :, :steps]
+    fig, axs = plt.subplots(1, 2, figsize=(12, 5), dpi=150)
+    
+    for ax, gt_data, pred_data, angle_name in zip(axs, [gt_phi, gt_psi], [pred_phi, pred_psi], ["Phi", "Psi"]):
+        hist_gt, edges = np.histogram(gt_data, bins=bins, range=[-math.pi, math.pi], density=True)
+        hist_pred, _ = np.histogram(pred_data, bins=bins, range=[-math.pi, math.pi], density=True)
+        centers = (edges[:-1] + edges[1:]) / 2
         
-        batch_size = gt.size(0)
-        self.mse_sum += circular_mse(gt_short, pred_short).item() * batch_size
-        self.mae_sum += circular_mae(gt_short, pred_short).item() * batch_size
-        self.count += batch_size
+        fe_gt = -np.log(hist_gt + 1e-10)
+        fe_pred = -np.log(hist_pred + 1e-10)
+        
+        fe_gt -= np.min(fe_gt)
+        fe_pred -= np.min(fe_pred)
+        
+        ax.plot(centers, fe_gt, label='Vrai (GT)', color='#1f77b4', linewidth=2)
+        ax.plot(centers, fe_pred, label='Généré (Flow)', color='#d62728', linestyle='dashed', linewidth=2)
+        
+        ax.set_title(f"Énergie Libre le long de {angle_name}")
+        ax.set_xlabel(f"Angle {angle_name} (rad)")
+        ax.set_ylabel("Énergie Libre (kT)")
+        
+        y_max = max(np.percentile(fe_gt, 95), np.percentile(fe_pred, 95)) + 2
+        ax.set_ylim(0, y_max)
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
-    def compute(self):
-        if self.count == 0: return {}
-        mean_mae_rad = self.mae_sum / self.count
-        return {
-            "MSE_circ": self.mse_sum / self.count,
-            "MAE_circ_deg": mean_mae_rad * (180.0 / math.pi)
-        }
+    plt.tight_layout()
+    plt.savefig(save_path)
+    plt.close()
+
+
+# =====================================================================
+# 3. MÉTRIQUES CINÉTIQUES (DYNAMIQUE LONG-TERME VIA VAMPNET)
+# =====================================================================
 
 def evaluate_vampnet_kinetics(pred_trajs_cpu, vampnet_model, target_timescales, lag_time=1):
     """
     Utilise le VAMPnet pré-entraîné pour évaluer la cinétique des trajectoires générées.
-    
-    Args:
-        pred_trajs_cpu: Numpy array des trajectoires générées (N, 2, L)
-        vampnet_model: Le modèle PyTorch/Deeptime VAMPnet entraîné (Le Juge)
-        target_timescales: Les temps implicites de la vraie physique
     """
     print("\n--- ÉVALUATION CINÉTIQUE VIA VAMPNET ---")
     
-    # 1. Transformation Topologique (VAMPnet a besoin de sin/cos, pas des angles bruts)
+    # 1. Transformation Topologique
     phi = pred_trajs_cpu[:, 0, :]
     psi = pred_trajs_cpu[:, 1, :]
-    
-    sincos_trajs = np.stack([
-        np.sin(phi), np.cos(phi), 
-        np.sin(psi), np.cos(psi)
-    ], axis=-1).astype(np.float32) # Shape: (N, L, 4)
+    sincos_trajs = np.stack([np.sin(phi), np.cos(phi), np.sin(psi), np.cos(psi)], axis=-1).astype(np.float32)
 
     # 2. VAMPnet lit les trajectoires
     dtrajs_gen = []
     for traj in sincos_trajs:
-        # Probabilités (Soft assignments)
         probs = vampnet_model.transform(traj)
-        # Assignations strictes (Hard assignments) pour le Modèle de Markov
         hard_labels = np.argmax(probs, axis=1)
         dtrajs_gen.append(hard_labels)
 
-    # 3. Construction de la Matrice de Transition sur les données générées
+    # 3. Construction de la Matrice de Transition générée
     try:
         count_estimator = markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding")
         counts_gen = count_estimator.fit(dtrajs_gen).fetch_model()
@@ -194,7 +207,7 @@ def evaluate_vampnet_kinetics(pred_trajs_cpu, vampnet_model, target_timescales, 
         gen_transition_matrix = gen_model.transition_matrix
         gen_timescales = gen_model.timescales()
 
-        # 4. Affichage et Comparaison
+        # 4. Affichage console
         print(">> Comparaison des Temps Implicites (Implied Timescales) :")
         n_timescales = min(len(target_timescales), len(gen_timescales))
 
@@ -207,8 +220,67 @@ def evaluate_vampnet_kinetics(pred_trajs_cpu, vampnet_model, target_timescales, 
         print("\n>> Matrice de Transition Générée :")
         print(np.round(gen_transition_matrix, 3))
 
-        return gen_timescales
+        # IMPORTANT : Retourne les timescales ET le modèle pour le CK-test
+        return gen_timescales, gen_model
 
     except Exception as e:
         print(f"Échec du Modèle de Markov. Les trajectoires générées ne visitent peut-être pas tous les états : {e}")
-        return None
+        return None, None
+
+def plot_timescales_comparison(target_timescales, gen_timescales, save_path):
+    """Génère un graphique en barres logarithmiques des temps de relaxation."""
+    if gen_timescales is None or len(gen_timescales) == 0:
+        return
+
+    n_timescales = min(len(target_timescales), len(gen_timescales))
+    targets = target_timescales[:n_timescales]
+    gens = gen_timescales[:n_timescales]
+    
+    x = np.arange(n_timescales)
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(8, 6), dpi=120)
+    
+    rects1 = ax.bar(x - width/2, targets, width, label='Vrai (Ground Truth)', color='#1f77b4')
+    rects2 = ax.bar(x + width/2, gens, width, label='Généré (Flow Matching)', color='#d62728')
+
+    ax.set_ylabel('Temps Implicite / Relaxation (pas)', fontsize=12)
+    ax.set_title('Comparaison de la Cinétique Globale (Implied Timescales)', fontsize=14)
+    ax.set_xticks(x)
+    ax.set_xticklabels([f'Processus lent {i+1}' for i in range(n_timescales)])
+    ax.legend()
+    ax.set_yscale('log')
+    ax.grid(True, which="both", ls="--", alpha=0.3)
+
+    for rect in rects1 + rects2:
+        height = rect.get_height()
+        ax.annotate(f'{height:.1f}',
+                    xy=(rect.get_x() + rect.get_width() / 2, height),
+                    xytext=(0, 3), 
+                    textcoords="offset points",
+                    ha='center', va='bottom', fontsize=9)
+
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150)
+    plt.close()
+
+def perform_ck_test(gen_model, save_path, mlags=5):
+    """
+    Exécute le Test de Chapman-Kolmogorov.
+    Preuve ultime que la dynamique générée est markovienne (Wu et al. 2018).
+    """
+    print("Exécution du Test de Chapman-Kolmogorov...")
+    try:
+        ck_test_results = gen_model.ck_test(mlags=mlags)
+        
+        fig, axes = dtplots.plot_ck_test(ck_test_results)
+        fig.suptitle("Test de Chapman-Kolmogorov (Validation Cinétique)", fontsize=16)
+        plt.tight_layout()
+        plt.savefig(save_path, dpi=150)
+        plt.close()
+        
+        print(f"Graphique CK-test sauvegardé : {save_path}")
+        return True
+    except Exception as e:
+        print(f"Impossible de réaliser le CK-test : {e}")
+        return False

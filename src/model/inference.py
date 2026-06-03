@@ -61,12 +61,14 @@ def main():
     parser.add_argument("--ar_steps", type=int, default=50, help="Nombre de chunks à générer en auto-régression")
     parser.add_argument("--vampnet_path", type=str, default="", help="Chemin vers le modèle VAMPnet (.pt) pour l'évaluation cinétique")
     parser.add_argument("--baseline_path", type=str, default="", help="Chemin vers les timescales cibles (.pkl)")
+    parser.add_argument("--model_path", type=str, default="../../../checkpoints/model_best_thermo_model.pt", help="Chemin vers les timescales cibles (.pkl)")
+
     args = parser.parse_args()
 
     if not args.model_path:
         raise ValueError("ERREUR : Spécifiez --model_path pour évaluer le Flow Matching !")
 
-    os.makedirs(args.eval_dir, exist_ok=True)
+    os.makedirs(args.log_dir, exist_ok=True)
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     print(f"\nLancement de l'évaluation globale sur : {device}")
 
@@ -98,7 +100,7 @@ def main():
             if b_idx == 0:
                 for i in range(min(4, gt_batch.shape[0])):
                     mae_spec = circular_mae(gt_batch[i].unsqueeze(0), pred_batch[i].unsqueeze(0)).item() * (180.0/math.pi)
-                    plot_trajectory(gt_batch[i], pred_batch[i], mae_spec, os.path.join(args.eval_dir, f"test_short_term_{i}.png"))
+                    plot_trajectory(gt_batch[i], pred_batch[i], mae_spec, os.path.join(args.log_dir, f"test_short_term_{i}.png"))
 
     res_short_term = metrics.compute()
 
@@ -119,7 +121,7 @@ def main():
 
     print("\nCalcul de la Thermodynamique (JSD)...")
     jsd_score = compute_ramachandran_jsd(long_gt_trajs, long_pred_trajs)
-    plot_ramachandran(torch.tensor(long_gt_trajs), torch.tensor(long_pred_trajs), jsd_score, os.path.join(args.eval_dir, "ramachandran_ar_eval.png"))
+    plot_ramachandran(torch.tensor(long_gt_trajs), torch.tensor(long_pred_trajs), jsd_score, os.path.join(args.log_dir, "ramachandran_ar_eval.png"))
 
     timescale_errors = {}
     if args.vampnet_path and args.baseline_path:
@@ -135,7 +137,7 @@ def main():
             gen_timescales = evaluate_vampnet_kinetics(long_pred_trajs, vampnet_juge, target_timescales, lag_time=1)
 
             if gen_timescales is not None:
-                plot_timescales_comparison(target_timescales, gen_timescales, os.path.join(args.eval_dir, "kinetics_timescales.png"))
+                plot_timescales_comparison(target_timescales, gen_timescales, os.path.join(args.log_dir, "kinetics_timescales.png"))
 
                 # Formatage pour le JSON
                 n_t = min(len(target_timescales), len(gen_timescales))
@@ -163,7 +165,7 @@ def main():
         "3_kinetics_vampnet": timescale_errors
     }
 
-    report_path = os.path.join(args.eval_dir, "evaluation_report.json")
+    report_path = os.path.join(args.log_dir, "evaluation_report.json")
     with open(report_path, "w") as f:
         json.dump(report, f, indent=4)
 
@@ -176,7 +178,7 @@ def main():
         err_moy = np.mean([v["error_relative_percent"] for v in timescale_errors.values()])
         print(f"3. Fidélité Cinétique VAMPnet (Erreur Moyenne) : {err_moy:.1f}%")
     print("="*50)
-    print(f"Rapports et graphiques sauvegardés dans : {args.eval_dir}")
+    print(f"Rapports et graphiques sauvegardés dans : {args.log_dir}")
 
 if __name__ == "__main__":
     main()
