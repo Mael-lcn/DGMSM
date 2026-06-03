@@ -4,6 +4,8 @@ from scipy.spatial.distance import jensenshannon
 import matplotlib.pyplot as plt
 import torch
 
+import deeptime.markov as markov
+
 
 
 def angular_difference(gt, pred):
@@ -117,11 +119,14 @@ def plot_ramachandran(gt, pred, jsd_score, save_path):
     plt.close()
 
 
+
 class TrajectoryMetrics:
     """
-    Garde en mémoire les statistiques des erreurs sur l'ensemble d'une époque (Validation/Test).
+    Calcule les statistiques d'erreurs (MSE/MAE) UNIQUEMENT sur le court-terme 
+    pour éviter la divergence chaotique.
     """
-    def __init__(self):
+    def __init__(self, max_eval_steps=3):
+        self.max_eval_steps = max_eval_steps
         self.reset()
 
     def reset(self):
@@ -130,35 +135,80 @@ class TrajectoryMetrics:
         self.count = 0
 
     def update(self, gt, pred):
-        """
-        Met à jour les compteurs avec un nouveau batch.
-        """
-        batch_size = gt.size(0)
+        # On ne prend que les 'max_eval_steps' premiers pas pour la MSE/MAE !
+        # Shape attendue: (Batch, 2, L)
+        steps = min(self.max_eval_steps, gt.shape[2])
+        gt_short = gt[:, :, :steps]
+        pred_short = pred[:, :, :steps]
         
-        # On multiplie par le batch_size pour avoir la somme totale de l'erreur
-        self.mse_sum += circular_mse(gt, pred).item() * batch_size
-        self.mae_sum += circular_mae(gt, pred).item() * batch_size
+        batch_size = gt.size(0)
+        self.mse_sum += circular_mse(gt_short, pred_short).item() * batch_size
+        self.mae_sum += circular_mae(gt_short, pred_short).item() * batch_size
         self.count += batch_size
 
     def compute(self):
-        """
-        Retourne la moyenne des métriques.
-        """
-        if self.count == 0:
-            return {"MSE_circ": 0.0, "MAE_circ_rad": 0.0, "MAE_circ_deg": 0.0}
-
-        mean_mse = self.mse_sum / self.count
+        if self.count == 0: return {}
         mean_mae_rad = self.mae_sum / self.count
-        
-        # Conversion en degrés
-        mean_mae_deg = mean_mae_rad * (180.0 / math.pi)
-
         return {
-            "MSE_circ": mean_mse,
-            "MAE_circ_rad": mean_mae_rad,
-            "MAE_circ_deg": mean_mae_deg
+            "MSE_circ": self.mse_sum / self.count,
+            "MAE_circ_deg": mean_mae_rad * (180.0 / math.pi)
         }
 
-    def __repr__(self):
-        metrics = self.compute()
-        return f"Circular MSE: {metrics['MSE_circ']:.4f} | Circular MAE: {metrics['MAE_circ_deg']:.2f}°"
+def evaluate_vampnet_kinetics(pred_trajs_cpu, vampnet_model, target_timescales, lag_time=1):
+    """
+    Utilise le VAMPnet pré-entraîné pour évaluer la cinétique des trajectoires générées.
+    
+    Args:
+        pred_trajs_cpu: Numpy array des trajectoires générées (N, 2, L)
+        vampnet_model: Le modèle PyTorch/Deeptime VAMPnet entraîné (Le Juge)
+        target_timescales: Les temps implicites de la vraie physique
+    """
+    print("\n--- ÉVALUATION CINÉTIQUE VIA VAMPNET ---")
+    
+    # 1. Transformation Topologique (VAMPnet a besoin de sin/cos, pas des angles bruts)
+    phi = pred_trajs_cpu[:, 0, :]
+    psi = pred_trajs_cpu[:, 1, :]
+    
+    sincos_trajs = np.stack([
+        np.sin(phi), np.cos(phi), 
+        np.sin(psi), np.cos(psi)
+    ], axis=-1).astype(np.float32) # Shape: (N, L, 4)
+
+    # 2. VAMPnet lit les trajectoires
+    dtrajs_gen = []
+    for traj in sincos_trajs:
+        # Probabilités (Soft assignments)
+        probs = vampnet_model.transform(traj)
+        # Assignations strictes (Hard assignments) pour le Modèle de Markov
+        hard_labels = np.argmax(probs, axis=1)
+        dtrajs_gen.append(hard_labels)
+
+    # 3. Construction de la Matrice de Transition sur les données générées
+    try:
+        count_estimator = markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding")
+        counts_gen = count_estimator.fit(dtrajs_gen).fetch_model()
+
+        msm_estimator = markov.msm.MaximumLikelihoodMSM(reversible=True)
+        gen_model = msm_estimator.fit(counts_gen).fetch_model()
+
+        gen_transition_matrix = gen_model.transition_matrix
+        gen_timescales = gen_model.timescales()
+
+        # 4. Affichage et Comparaison
+        print(">> Comparaison des Temps Implicites (Implied Timescales) :")
+        n_timescales = min(len(target_timescales), len(gen_timescales))
+
+        for i in range(n_timescales):
+            t_cible = target_timescales[i]
+            t_gen = gen_timescales[i]
+            erreur = abs(t_cible - t_gen) / t_cible * 100
+            print(f"  - Processus lent n°{i+1} | Vrai: {t_cible:.2f} | Généré: {t_gen:.2f} -> Erreur relative: {erreur:.1f}%")
+
+        print("\n>> Matrice de Transition Générée :")
+        print(np.round(gen_transition_matrix, 3))
+
+        return gen_timescales
+
+    except Exception as e:
+        print(f"Échec du Modèle de Markov. Les trajectoires générées ne visitent peut-être pas tous les états : {e}")
+        return None

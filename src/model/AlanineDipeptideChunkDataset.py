@@ -2,7 +2,6 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset, DataLoader
 import torch.nn.functional as F
-from torch.distributions.von_mises import VonMises
 
 
 
