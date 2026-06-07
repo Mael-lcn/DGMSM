@@ -49,21 +49,28 @@ class FlowMatchingEngine:
         v_pred = model(x_mapped, t, mamba_context)
         
         if energy_guide is not None:
+            # 1. Extraire les positions actuelles
             phi_t = x[:, 0, :]
             psi_t = x[:, 1, :]
-            
-            # 2. On interroge la FES pour obtenir la force de rappel (-gradient)
-            f_phi, f_psi = energy_guide.get_guidance_force(phi_t, psi_t, alpha=alpha)
 
-            print(f"DEBUG | Vitesse IA (norme): {v_pred.norm().item():.4f} | Force Phys (norme): {(f_phi**2 + f_psi**2).sqrt().mean().item():.4f}")
+            # 2. Obtenir la direction pure vers la vallée (-nabla F)
+            # En passant alpha=1.0 ici, get_guidance_force renvoie le vecteur unitaire pur
+            f_phi, f_psi = energy_guide.get_guidance_force(phi_t, psi_t, alpha=1.0)
 
-            # 3. On ajoute cette force physique à la vitesse prédite
-            v_pred[:, 0, :] += f_phi
-            v_pred[:, 1, :] += f_psi
+            # 3. Calculer la norme (vitesse) actuelle de l'IA
+            v_norm = th.sqrt(v_pred[:, 0, :]**2 + v_pred[:, 1, :]**2 + 1e-8)
 
-        # Intégration d'Euler sur le cercle (le dt s'applique à v_pred modifié)
+            # 4. Calculer la Force de Répulsion
+            # Répulsion = Direction de la pente * Vitesse de l'IA * Paramètre Alpha
+            repulsion_phi = f_phi * v_norm * alpha
+            repulsion_psi = f_psi * v_norm * alpha
+
+            # 5. Appliquer la déviation (On "pousse" la trajectoire hors de la montagne)
+            v_pred[:, 0, :] += repulsion_phi
+            v_pred[:, 1, :] += repulsion_psi
+
+        # Intégration finale
         sample = (x + v_pred * dt + math.pi) % (2 * math.pi) - math.pi
-
         return {"sample": sample}
 
     def p_sample_loop(

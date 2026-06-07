@@ -77,13 +77,13 @@ def main():
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     diffusion_engine = FlowMatchingEngine(euler_steps=args.euler_steps)
 
-    test_dataset = AlanineDipeptideChunkDataset(args.test_data, args.context_length)
+    test_dataset = AlanineDipeptideChunkDataset(args.test_data, args.context_length, training=False)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
     print("\n[Préparation] Chargement Ground Truth continu et Entraînement TICA...")
     true_continuous_trajs = load_continuous_simulation(args.true_sim_path)
     global_tica_model = fit_global_tica(true_continuous_trajs, lagtime=10)
-    
+
     global_kmeans, fes_gt, xedges, yedges = fit_global_kmeans(
             true_continuous_trajs, 
             n_clusters=args.n_clusters, 
@@ -142,7 +142,7 @@ def main():
     all_pred_trajs = []
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2")):
+        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2", len=len(test_loader))):
             if i >= args.max_sampling_batches: 
                 break
 

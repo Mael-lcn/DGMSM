@@ -74,15 +74,38 @@ def build_trans_matrix(dtrajs, n_clusters, lagtime=10):
     return np.divide(counts, row_sums, out=np.zeros_like(counts), where=row_sums!=0)
 
 def compute_stationary_from_T(T):
-    """Extrait la distribution stationnaire par décomposition en vecteurs propres."""
-    T_norm = T / (T.sum(axis=1, keepdims=True) + 1e-12)
-    vals, vecs = np.linalg.eig(T_norm.T)
+    """
+    Extrait la distribution stationnaire robuste.
+    Gère mathématiquement les états non visités sans crasher.
+    """
+    # 1. Identifier les états visités
+    visited = T.sum(axis=1) > 0
+    if not np.any(visited):
+        return np.ones(len(T)) / len(T)
+        
+    # 2. Extraire la sous-matrice valide
+    T_sub = T[visited][:, visited]
+    
+    # 3. Rendre parfaitement stochastique
+    row_sums = T_sub.sum(axis=1, keepdims=True)
+    T_sub = np.divide(T_sub, row_sums, out=np.zeros_like(T_sub), where=row_sums!=0)
+    T_sub[T_sub.sum(axis=1) == 0] = 1.0 / len(T_sub) # Sécurité finale
+    
+    # 4. Calcul des vecteurs propres
+    vals, vecs = np.linalg.eig(T_sub.T)
     idx = np.argmin(np.abs(vals - 1.0))
-    pi = np.real(vecs[:, idx])
-    pi = np.maximum(pi, 0) 
-    if pi.sum() == 0:
-        return np.ones(len(pi)) / len(pi) 
-    return pi / pi.sum()
+    pi_sub = np.real(vecs[:, idx])
+    pi_sub = np.maximum(pi_sub, 0)
+    
+    if pi_sub.sum() > 0:
+        pi_sub /= pi_sub.sum()
+    else:
+        pi_sub = np.ones(len(pi_sub)) / len(pi_sub)
+        
+    # 5. Reconstruire le vecteur complet
+    pi = np.zeros(len(T))
+    pi[visited] = pi_sub
+    return pi
 
 
 # =====================================================================
@@ -519,12 +542,17 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
     plot_transition_matrix_diff(T_gt, T_pred, "Phase 2", os.path.join(save_dir, "phase2_trans_diff.png"))
     plot_stationary_distributions(pi_gt, pi_pred, "Phase 2", os.path.join(save_dir, "phase2_stationary_dist.png"))
 
-    # Deeptime MSM pour MFPT et Timescales SOTA
+    # Deeptime MSM pour MFPT, Timescales et CK-Test SOTA
     try:
-        msm_gt = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding").fit(gt_dtrajs).fetch_model()).fetch_model()
-        msm_pred = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding").fit(pred_dtrajs).fetch_model()).fetch_model()
+        # 1. Estimateurs de comptage
+        count_gt = markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding").fit(gt_dtrajs).fetch_model()
+        count_pred = markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding").fit(pred_dtrajs).fetch_model()
 
-        # Spectres cinétiques
+        # 2. Extraction des modèles
+        msm_gt = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(count_gt).fetch_model()
+        msm_pred = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(count_pred).fetch_model()
+
+        # 3. Spectres cinétiques
         ts_gt = msm_gt.timescales()
         ts_pred = msm_pred.timescales()
         for k in range(3):
@@ -533,15 +561,25 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
             
         plot_mfpt_comparison(msm_gt, msm_pred, n_clusters, os.path.join(save_dir, "phase2_MFPT_comparison.png"))
 
-        # Test de Chapman-Kolmogorov
         try:
             import deeptime.plots as dplt
-            ck_pred = msm_pred.cktest(pred_dtrajs, mlags=5)
+
+            # Deeptime requiert d'estimer manuellement les modèles à plusieurs lagtimes pour le CK-test
+            models_ck = []
+            lags_ck = [lag_time * i for i in range(1, 6)] # Test sur lagtime x1, x2, x3, x4, x5
+            for lag in lags_ck:
+                c_model = markov.TransitionCountEstimator(lagtime=lag, count_mode="sliding").fit(pred_dtrajs).fetch_model()
+                m_model = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(c_model).fetch_model()
+                models_ck.append(m_model)
+
+            # Appel du test sur le modèle principal en lui donnant les autres modèles
+            ck_pred = msm_pred.ck_test(models_ck, n_metastable_sets=n_clusters)
             fig = dplt.plot_cktest(ck_pred)
-            plt.savefig(os.path.join(save_dir, "phase2_CK_test_pred.png"))
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, "phase2_CK_test_pred.png"), dpi=150)
             plt.close(fig)
         except Exception as e:
-            print(f"[Info] Test CK ignoré (module manquant ou non-convergé) : {e}")
+            print(f"[Info] Test CK ignoré (non-convergé ou lagtime inadapté) : {e}")
 
     except Exception as e:
         print(f"[Avertissement] Le modèle MSM SOTA n'a pas convergé : {e}")
