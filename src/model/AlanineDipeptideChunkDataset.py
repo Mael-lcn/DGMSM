@@ -26,13 +26,27 @@ class AlanineDipeptideChunkDataset(Dataset):
         return len(self.data)
     
     def apply_time_warp(self, chunk):
+        """
+        Applique une déformation temporelle "on-the-fly" par interpolation.
+        Comme la taille du chunk est fixe, on simule un ralentissement (zoom temporel)
+        en extrayant un sous-segment et en l'étirant à la taille originale.
+        """
         length = chunk.shape[0]
-        factor = 1.0 + torch.randn(1) * self.cfg["time_warp_mag"]
-        chunk_t = chunk.t().unsqueeze(0) 
-        new_length = max(1, int(length * factor))
-        warped = F.interpolate(chunk_t, size=new_length, mode='linear', align_corners=True)
-        final = F.interpolate(warped, size=length, mode='linear', align_corners=True)
-        return final.squeeze(0).t()
+        
+        # 1. On choisit une magnitude de déformation (ex: entre 70% et 100% de la taille d'origine)
+        factor = 1.0 - (torch.rand(1).item() * self.cfg["time_warp_mag"]) # factor <= 1.0
+        sub_length = max(2, int(length * factor))
+        
+        # 2. On crop un sous-segment aléatoire dans la trajectoire
+        start_idx = torch.randint(0, length - sub_length + 1, (1,)).item()
+        sub_chunk = chunk[start_idx : start_idx + sub_length]
+        
+        # 3. On interpole ce sous-segment pour qu'il remplisse la taille attendue par le modèle (length)
+        chunk_t = sub_chunk.t().unsqueeze(0) # Forme (Batch=1, Channels, Length)
+        warped = F.interpolate(chunk_t, size=length, mode='linear', align_corners=True)
+        
+        # 4. On redonne au tenseur sa forme d'origine (Length, Channels)
+        return warped.squeeze(0).t()
 
     def apply_periodic_jitter(self, chunk):
         """

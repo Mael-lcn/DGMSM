@@ -39,7 +39,7 @@ class FlowMatchingEngine:
         x_t = (noise + t_expand * v_target + math.pi) % (2 * math.pi) - math.pi
         return x_t, v_target
 
-    def p_sample(self, model, x, t, mamba_context, dt):
+    def p_sample(self, model, x, t, mamba_context, dt, energy_guide=None, alpha=0.1):
         """
         Avance la trajectoire d'un pas dt lors de l'inférence.
         """
@@ -47,7 +47,21 @@ class FlowMatchingEngine:
 
         # Le modèle prédit la vitesse angulaire (2 canaux)
         v_pred = model(x_mapped, t, mamba_context)
-        # Intégration d'Euler sur le cercle
+        
+        if energy_guide is not None:
+            phi_t = x[:, 0, :]
+            psi_t = x[:, 1, :]
+            
+            # 2. On interroge la FES pour obtenir la force de rappel (-gradient)
+            f_phi, f_psi = energy_guide.get_guidance_force(phi_t, psi_t, alpha=alpha)
+
+            print(f"DEBUG | Vitesse IA (norme): {v_pred.norm().item():.4f} | Force Phys (norme): {(f_phi**2 + f_psi**2).sqrt().mean().item():.4f}")
+
+            # 3. On ajoute cette force physique à la vitesse prédite
+            v_pred[:, 0, :] += f_phi
+            v_pred[:, 1, :] += f_psi
+
+        # Intégration d'Euler sur le cercle (le dt s'applique à v_pred modifié)
         sample = (x + v_pred * dt + math.pi) % (2 * math.pi) - math.pi
 
         return {"sample": sample}
@@ -60,11 +74,14 @@ class FlowMatchingEngine:
         noise=None,
         device=None,
         progress=False,
+        energy_guide=None,
+        alpha=0.1
     ):
         """Wrapper final pour générer la trajectoire."""
         final = None
+        # On n'oublie pas de transférer les paramètres physiques à la sous-boucle
         for sample in self.p_sample_loop_progressive(
-            model, shape, mamba_context, noise, device, progress
+            model, shape, mamba_context, noise, device, progress, energy_guide, alpha
         ):
             final = sample
         return final["sample"]
@@ -77,6 +94,8 @@ class FlowMatchingEngine:
         noise=None,
         device=None,
         progress=False,
+        energy_guide=None,
+        alpha=0.1
     ):
         """Boucle d'intégration d'Euler de t=0 à t=1."""
         if device is None:
@@ -96,8 +115,7 @@ class FlowMatchingEngine:
             from tqdm.auto import tqdm
             indices = tqdm(indices)
 
-
-        power = 2.0 
+        power = 2.0
 
         for i in indices:
             # Progression linéaire de 0.0 à 1.0
@@ -117,7 +135,8 @@ class FlowMatchingEngine:
             t = th.tensor([t_val] * shape[0], device=device, dtype=th.float32)
 
             with th.no_grad():
-                out = self.p_sample(model, img, t, mamba_context, dt)
+                # On passe le guide d'énergie et l'alpha au solveur step-by-step
+                out = self.p_sample(model, img, t, mamba_context, dt, energy_guide, alpha)
                 yield out
                 img = out["sample"]
 

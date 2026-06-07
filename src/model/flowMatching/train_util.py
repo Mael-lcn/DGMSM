@@ -3,7 +3,7 @@ import torch as th
 from tqdm import tqdm
 from torch.optim import AdamW
 
-from .Evaluation import plot_trajectory, TrajectoryMetrics, compute_ramachandran_jsd, plot_ramachandran
+from .Evaluation import Phase1Evaluator
 
 
 
@@ -130,11 +130,10 @@ class TrainLoop:
     def valuate_and_plot(self):
         print(f"\n--- Validation complète sur tout le dataset au step {self.step} ---")
         self.model.eval()
-        metrics = TrajectoryMetrics()
+        
+        # Initialisation de l'évaluateur unifié (Phase 1)
+        evaluator = Phase1Evaluator(max_mae_steps=3)
         self.diffusion.euler_steps = self.euler_steps
-
-        all_gt = []
-        all_pred = []
         total_val_loss = 0.0
 
         with th.no_grad():
@@ -153,40 +152,29 @@ class TrainLoop:
                     mamba_context=cond_batch, device=self.device
                 )
 
-                # Accumulation pour les métriques globales
-                metrics.update(gt_batch, pred_batch)
-                all_gt.append(gt_batch.cpu())
-                all_pred.append(pred_batch.cpu())
+                # Mise à jour de l'évaluateur
+                evaluator.update(gt_batch, pred_batch)
 
-            # Agrégation des résultats
-            res = metrics.compute()
+            # Le calcul des métriques et la création des PNG se font en une seule ligne
+            res = evaluator.compute_and_log(step=self.step, save_dir=self.log_dir)
+            
             avg_val_loss = total_val_loss / len(self.val_loader)
+            jsd_score = res["P1_JSD_Distribution"]
+            mae_score = res["P1_MAE_Circ_Deg_3steps"]
 
-            # Concaténation pour le calcul JSD global
-            full_gt = th.cat(all_gt, dim=0)
-            full_pred = th.cat(all_pred, dim=0)
-            jsd_score = compute_ramachandran_jsd(full_gt, full_pred)
-
-            # Logs historiques
+            # Logs historiques pour la courbe de perte
             self.val_steps.append(self.step)
             self.val_loss_history.append(avg_val_loss)
-            self.val_mae_history.append(res["MAE_circ_deg"])
+            self.val_mae_history.append(mae_score)
             self.val_jsd_history.append(jsd_score)
 
-            print(f"Val Flow Loss: {avg_val_loss:.4f} | MAE: {res['MAE_circ_deg']:.2f}°")
+            print(f"Val Flow Loss: {avg_val_loss:.4f} | MAE: {mae_score:.2f}°")
             print(f"Thermodynamic JSD: {jsd_score:.4f}")
 
             if jsd_score < self.val_best_jsd:
                 print(f"Nouveau Record Thermodynamique ! JSD descendue à {jsd_score:.4f}")
                 self.val_best_jsd = jsd_score
                 self.save_checkpoint("best_thermo_model")
-
-            # Sauvegarde des plots (sur le dernier batch pour la trajectoire)
-            plot_path_traj = os.path.join(self.log_dir, f"traj_step_{self.step}.png")
-            plot_trajectory(gt_batch[0], pred_batch[0], res["MAE_circ_deg"], plot_path_traj)
-
-            plot_path_rama = os.path.join(self.log_dir, f"rama_step_{self.step}.png")
-            plot_ramachandran(full_gt, full_pred, jsd_score, plot_path_rama)
 
     def save_checkpoint(self, name_suffix):
         filename = f"model_{name_suffix}.pt"

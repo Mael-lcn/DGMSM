@@ -1,80 +1,77 @@
 import os
-import math
-import json
-import pickle
+import glob
+import pandas as pd
 import numpy as np
 from tqdm import tqdm
-
 import torch
 from torch.utils.data import DataLoader
 
 from config import get_shared_parser
 from flowMatching.ConditionalFlowMolecule import ConditionalFlowMolecule
 from flowMatching.flow_matching import FlowMatchingEngine
-from flowMatching.Evaluation import (
-    plot_trajectory, TrajectoryMetrics, circular_mae,
-    compute_ramachandran_jsd, plot_ramachandran,
-    evaluate_vampnet_kinetics, plot_timescales_comparison
-)
 from AlanineDipeptideChunkDataset import AlanineDipeptideChunkDataset 
 
+from flowMatching.Evaluation import (
+    Phase1Evaluator, run_phase_2_eval, fit_global_tica, fit_global_kmeans,
+    to_sincos_flat, build_trans_matrix, compute_stationary_from_T
+)
+from flowMatching.EnergyGuidance import EnergyGuidance
 
 
-def autoregressive_rollout(model, diffusion_engine, initial_context, chunk_size, num_ar_steps, device):
-    """
-    Génère une longue trajectoire en réinjectant ses propres prédictions comme contexte.
-    
-    Args:
-        initial_context: Tenseur de forme (B, 2, context_length)
-        chunk_size: Nombre de pas générés à chaque itération du Flow Matching
-        num_ar_steps: Nombre total de chunks à générer
-    """
+
+def autoregressive_sampling_dynamic(model, diffusion_engine, initial_contexts, chunk_size, max_ar_steps, device, energy_guide=None, alpha=0.1):
     model.eval()
-    B, C, context_length = initial_context.shape
-    current_context = initial_context.clone()
-    
-    # On stocke toute la trajectoire générée
+    B, C, context_length = initial_contexts.shape
+    current_context = initial_contexts.clone()
     generated_trajectory = []
-    
+
     with torch.no_grad():
-        for _ in tqdm(range(num_ar_steps), desc="Génération Auto-régressive"):
+        for _ in range(max_ar_steps):
             shape = (B, C, chunk_size)
-            
-            # 1. Génération du prochain chunk
+            # On passe le guide ici au solveur
             pred_chunk = diffusion_engine.p_sample_loop(
-                model=model, shape=shape, mamba_context=current_context, device=device
+                model=model, shape=shape, mamba_context=current_context, device=device,
+                energy_guide=energy_guide, alpha=alpha 
             )
-            generated_trajectory.append(pred_chunk.cpu())
-            
-            # 2. Mise à jour du contexte (Glissement de la fenêtre)
-            # On colle l'ancien contexte et la nouvelle prédiction, et on garde les 'context_length' derniers pas
+            generated_trajectory.append(pred_chunk.cpu().numpy())
+
             full_sequence = torch.cat([current_context, pred_chunk], dim=2)
             current_context = full_sequence[:, :, -context_length:]
 
-    # Concaténation finale (B, 2, num_ar_steps * chunk_size)
-    return torch.cat(generated_trajectory, dim=2).numpy()
+    return np.concatenate(generated_trajectory, axis=2)
+
+
+def load_continuous_simulation(file_pattern):
+    """Charge la simulation réelle (Ground Truth) pour la Phase 2 et TICA."""
+    files = glob.glob(file_pattern)
+    if not files:
+        raise FileNotFoundError(f"Aucune vraie simulation trouvée pour : {file_pattern}")
+    continuous_trajs = []
+    for file_path in files:
+        with np.load(file_path) as npz_file:
+            for key in npz_file.files:
+                data = npz_file[key]
+                traj = np.transpose(data).reshape(1, 2, -1)
+                continuous_trajs.append(traj)
+    return continuous_trajs
 
 
 def main():
     parser = get_shared_parser()
-    # Ajout d'arguments spécifiques à l'inférence longue
-    parser.add_argument("--ar_steps", type=int, default=50, help="Nombre de chunks à générer en auto-régression")
-    parser.add_argument("--vampnet_path", type=str, default="", help="Chemin vers le modèle VAMPnet (.pt) pour l'évaluation cinétique")
-    parser.add_argument("--baseline_path", type=str, default="", help="Chemin vers les timescales cibles (.pkl)")
-    parser.add_argument("--model_path", type=str, default="../../../checkpoints/model_best_thermo_model.pt", help="Chemin vers les timescales cibles (.pkl)")
-
+    parser.add_argument("--max_ar_steps", type=int, default=100, help="Nombre de blocs concaténés (Phase 2)")
+    parser.add_argument("--max_sampling_batches", type=int, default=10, help="Nombre de batchs testés (Phase 2)")
+    parser.add_argument("--model_path", type=str, default="../../../output/logs/model_best_thermo_model.pt")
+    parser.add_argument("--test_data", type=str, default="../../../output/dataset/test.npy")
+    parser.add_argument("--true_sim_path", type=str, default="../../../data/*backbone-dihedrals.npz")
+    parser.add_argument("--n_clusters", type=int, default=6, help="Conformations K-Means")
+    parser.add_argument("--alpha", type=float, default=0.1)
     args = parser.parse_args()
-
-    if not args.model_path:
-        raise ValueError("ERREUR : Spécifiez --model_path pour évaluer le Flow Matching !")
 
     os.makedirs(args.log_dir, exist_ok=True)
     device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
-    print(f"\nLancement de l'évaluation globale sur : {device}")
 
-    # 1. Chargement du modèle de Diffusion (Flow Matching + Mamba)
     model = ConditionalFlowMolecule(
-        mamba_in_channels=2, flow_in_channels=4, context_dim=args.mamba_dim,
+        mamba_in_channels=4, flow_in_channels=4, context_dim=args.mamba_dim,
         mamba_layers=args.mamba_layers, flow_channels=args.flow_channels, flow_blocks=args.flow_blocks
     ).to(device)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
@@ -83,102 +80,123 @@ def main():
     test_dataset = AlanineDipeptideChunkDataset(args.test_data, args.context_length)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
-    print("\n--- PHASE 1 : Évaluation Locale (Teacher-Forcing) ---")
-    metrics = TrajectoryMetrics(max_eval_steps=3) 
+    print("\n[Préparation] Chargement Ground Truth continu et Entraînement TICA...")
+    true_continuous_trajs = load_continuous_simulation(args.true_sim_path)
+    global_tica_model = fit_global_tica(true_continuous_trajs, lagtime=10)
+    
+    global_kmeans, fes_gt, xedges, yedges = fit_global_kmeans(
+            true_continuous_trajs, 
+            n_clusters=args.n_clusters, 
+            save_dir=args.log_dir
+        )
 
+    energy_guide = EnergyGuidance(fes_gt, xedges, yedges)
+
+    print("\n[Préparation] Calcul de la Cinétique Globale (Ground Truth)...")
+    def discretize_global(t_list):
+        dtrajs = []
+        for traj in t_list:
+            if isinstance(traj, torch.Tensor): traj = traj.cpu().numpy()
+            B, _, T = traj.shape
+            sc = to_sincos_flat(traj)
+            cl = global_kmeans.predict(sc).reshape(B, T)
+            dtrajs.extend([cl[i] for i in range(B)])
+        return dtrajs
+
+    gt_dtrajs_global = discretize_global(true_continuous_trajs)
+    T_gt = build_trans_matrix(gt_dtrajs_global, args.n_clusters, lagtime=10)
+    pi_gt = compute_stationary_from_T(T_gt)
+
+
+    # ==========================================================
+    # PHASE 1 : DYNAMIQUE LOCALE (1 CHUNK)
+    # ==========================================================
+    print("\n" + "="*60)
+    print("PHASE 1 : ÉVALUATION SUR L'ENSEMBLE DES BLOCS COURTS")
+    print("="*60)
+
+    phase1_eval = Phase1Evaluator(max_mae_steps=3)
+    
     with torch.no_grad():
-        for b_idx, batch in enumerate(tqdm(test_loader, desc="Test Court-Terme")):
-            gt_batch = batch["GT"].to(device)
-            cond_batch = batch["input"].to(device)
-            
-            # On ne fait qu'une seule prédiction par batch pour calculer la MAE
+        for batch in tqdm(test_loader, desc="Génération Phase 1"):
+            gt_batch, cond_batch = batch["GT"].to(device), batch["input"].to(device)
             pred_batch = diffusion_engine.p_sample_loop(
                 model=model, shape=(gt_batch.shape[0], 2, gt_batch.shape[2]), mamba_context=cond_batch, device=device
             )
-            metrics.update(gt_batch, pred_batch)
+            phase1_eval.update(gt_batch, pred_batch)
 
-            if b_idx == 0:
-                for i in range(min(4, gt_batch.shape[0])):
-                    mae_spec = circular_mae(gt_batch[i].unsqueeze(0), pred_batch[i].unsqueeze(0)).item() * (180.0/math.pi)
-                    plot_trajectory(gt_batch[i], pred_batch[i], mae_spec, os.path.join(args.log_dir, f"test_short_term_{i}.png"))
-
-    res_short_term = metrics.compute()
-
-    print("\n--- PHASE 2 : Rollout Auto-régressif (Long-Terme) ---")
-
-    # On prend juste le TOUT PREMIER contexte du dataset comme graine
-    seed_batch = next(iter(test_loader))
-    initial_context = seed_batch["input"].to(device)
-    chunk_size = seed_batch["GT"].shape[2] # Taille d'un chunk (ex: 10)
-
-    # Génération de la trajectoire longue (shape: [Batch, 2, num_ar_steps * chunk_size])
-    long_pred_trajs = autoregressive_rollout(
-        model, diffusion_engine, initial_context, chunk_size, args.ar_steps, device
+    # On passe T_gt et pi_gt pour obtenir les nouvelles métriques comparatives
+    metrics_p1 = phase1_eval.compute_and_log(
+        step="eval", save_dir=args.log_dir, 
+        global_kmeans=global_kmeans, tica_model=global_tica_model,
+        T_gt=T_gt, pi_gt=pi_gt
     )
 
-    # Pour comparer la thermodynamique, on prend un échantillon équivalent de la vraie donnée
-    long_gt_trajs = np.concatenate([b["GT"].numpy() for _, b in zip(range(args.ar_steps), test_loader)], axis=2)
+    # ==========================================================
+    # PHASE 2 : DYNAMIQUE LONG TERME ET CINÉTIQUE
+    # ==========================================================
+    print("\n" + "="*60)
+    print("PHASE 2 : SAMPLING LONG-TERME DYNAMIQUE")
+    print("="*60)
 
-    print("\nCalcul de la Thermodynamique (JSD)...")
-    jsd_score = compute_ramachandran_jsd(long_gt_trajs, long_pred_trajs)
-    plot_ramachandran(torch.tensor(long_gt_trajs), torch.tensor(long_pred_trajs), jsd_score, os.path.join(args.log_dir, "ramachandran_ar_eval.png"))
+    all_pred_trajs = []
 
-    timescale_errors = {}
-    if args.vampnet_path and args.baseline_path:
-        print("\n--- PHASE 3 : Évaluation Cinétique (VAMPnet) ---")
-        try:
-            # Chargement de la baseline et du juge
-            vampnet_juge = torch.load(args.vampnet_path, map_location=device)
-            with open(args.baseline_path, "rb") as f:
-                baseline_data = pickle.load(f)
-                target_timescales = baseline_data["timescales"]
+    with torch.no_grad():
+        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2")):
+            if i >= args.max_sampling_batches: 
+                break
 
-            # VAMPnet lit nos trajectoires générées auto-régressivement
-            gen_timescales = evaluate_vampnet_kinetics(long_pred_trajs, vampnet_juge, target_timescales, lag_time=1)
+            batch_traj = autoregressive_sampling_dynamic(
+                model, diffusion_engine, batch["input"].to(device), 
+                batch["GT"].shape[2], args.max_ar_steps, device,
+                energy_guide=energy_guide, alpha=args.alpha
+            )
+            all_pred_trajs.append(batch_traj)
 
-            if gen_timescales is not None:
-                plot_timescales_comparison(target_timescales, gen_timescales, os.path.join(args.log_dir, "kinetics_timescales.png"))
+    # On passe T_gt et pi_gt à la phase 2
+    metrics_p2 = run_phase_2_eval(
+        true_continuous_trajs, all_pred_trajs, args.log_dir, 
+        fes_gt=fes_gt, xedges=xedges, yedges=yedges,
+        global_kmeans=global_kmeans, tica_model=global_tica_model,
+        T_gt=T_gt, pi_gt=pi_gt
+    )
 
-                # Formatage pour le JSON
-                n_t = min(len(target_timescales), len(gen_timescales))
-                for i in range(n_t):
-                    t_cible = float(target_timescales[i])
-                    t_gen = float(gen_timescales[i])
-                    timescale_errors[f"process_{i+1}"] = {
-                        "target": t_cible, "generated": t_gen,
-                        "error_relative_percent": abs(t_cible - t_gen) / t_cible * 100
-                    }
-        except Exception as e:
-            print(f"Erreur lors de l'évaluation VAMPnet : {e}")
-    else:
-        print("\n[!] Paramètres --vampnet_path ou --baseline_path manquants. Évaluation cinétique ignorée.")
 
-    report = {
-        "1_local_dynamics_short_term": {
-            "circular_mae_deg": float(res_short_term.get('MAE_circ_deg', 0)),
-            "circular_mse_rad": float(res_short_term.get('MSE_circ', 0))
-        },
-        "2_thermodynamics_long_term": {
-            "autoregressive_steps": args.ar_steps,
-            "ramachandran_jsd": float(jsd_score)
-        },
-        "3_kinetics_vampnet": timescale_errors
-    }
+    final_metrics = {**metrics_p1, **metrics_p2}
+    df_metrics = pd.DataFrame([final_metrics])
+    csv_path = os.path.join(args.log_dir, "comprehensive_metrics.csv")
+    df_metrics.to_csv(csv_path, index=False)
 
-    report_path = os.path.join(args.log_dir, "evaluation_report.json")
-    with open(report_path, "w") as f:
-        json.dump(report, f, indent=4)
-
-    print("\n" + "="*50)
-    print("ÉVALUATION TERMINÉE AVEC SUCCÈS")
-    print("="*50)
-    print(f"1. Précision Solveur ODE (MAE) : {report['1_local_dynamics_short_term']['circular_mae_deg']:.2f}°")
-    print(f"2. Fidélité Thermodynamique (JSD) : {jsd_score:.4f}")
-    if timescale_errors:
-        err_moy = np.mean([v["error_relative_percent"] for v in timescale_errors.values()])
-        print(f"3. Fidélité Cinétique VAMPnet (Erreur Moyenne) : {err_moy:.1f}%")
-    print("="*50)
-    print(f"Rapports et graphiques sauvegardés dans : {args.log_dir}")
+    # NOUVEAU : Affichage enrichi avec le Transport Optimal et la Thermo !
+    print("\n" + "="*65)
+    print("BILAN SOTA DÉFINITIF")
+    print("="*65)
+    print("--- [PHASE 1 : Dynamique Locale (16 pas)] ---")
+    print(f"MAE Solveur ODE (3 pas)      : {metrics_p1.get('P1_MAE_Circ_Deg_3steps', 0):.2f}°")
+    print(f"Distance Wasserstein (W1)    : {metrics_p1.get('P1_Wasserstein_Rad', 0):.4f} rad")
+    print(f"MAE Matrice Transition       : {metrics_p1.get('P1_Transition_Matrix_MAE', 0):.4f}")
+    print(f"MAE Dist. Stationnaire (pi)  : {metrics_p1.get('P1_Stationary_Dist_MAE', 0):.4f}")
+    
+    print("\n--- [PHASE 2 : Dynamique Macroscopique] ---")
+    print(f"FES RMSE (Erreur Energie)    : {metrics_p2.get('P2_FES_RMSE_kcal_mol', 0):.2f} kcal/mol")
+    print(f"Distance Wasserstein (W1)    : {metrics_p2.get('P2_Wasserstein_Rad', 0):.4f} rad")
+    print(f"MAE Matrice Transition       : {metrics_p2.get('P2_Transition_Matrix_MAE', 0):.4f}")
+    print(f"MAE Dist. Stationnaire (pi)  : {metrics_p2.get('P2_Stationary_Dist_MAE', 0):.4f}")
+    print(f"Corrélation Pearson TICA     : {metrics_p2.get('P2_TICA_Pearson', 0):.3f}")
+    
+    # Affichage intelligent des temps d'implication (t2, t3, t4)
+    t2_gt = metrics_p2.get('P2_t2_GT_Steps', 0)
+    t2_pr = metrics_p2.get('P2_t2_Pred_Steps', 0)
+    t3_gt = metrics_p2.get('P2_t3_GT_Steps', 0)
+    t3_pr = metrics_p2.get('P2_t3_Pred_Steps', 0)
+    
+    print(f"\nTemps Relaxation t2 (GT/Pred): {t2_gt:.1f} / {t2_pr:.1f} pas")
+    if t3_gt > 0:
+        print(f"Temps Relaxation t3 (GT/Pred): {t3_gt:.1f} / {t3_pr:.1f} pas")
+        
+    print("\n" + "-"*65)
+    print(f"-> Graphes (MFPT, CK-Test, Heatmaps) sauvegardés dans : {args.log_dir}")
+    print("="*65)
 
 if __name__ == "__main__":
     main()

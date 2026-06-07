@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 
 from MambaContextEncoder import MambaContextEncoder
-from .FlowNetwork import FlowNetwork1D
 from .Dit import DiT1D
 
 
