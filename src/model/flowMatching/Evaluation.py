@@ -542,7 +542,7 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
     plot_transition_matrix_diff(T_gt, T_pred, "Phase 2", os.path.join(save_dir, "phase2_trans_diff.png"))
     plot_stationary_distributions(pi_gt, pi_pred, "Phase 2", os.path.join(save_dir, "phase2_stationary_dist.png"))
 
-    # Deeptime MSM pour MFPT, Timescales et CK-Test SOTA
+    # Deeptime MSM pour MFPT, Timescales, Stationnaire et CK-Test SOTA
     try:
         # 1. Estimateurs de comptage
         count_gt = markov.TransitionCountEstimator(lagtime=lag_time, count_mode="sliding").fit(gt_dtrajs).fetch_model()
@@ -551,6 +551,17 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
         # 2. Extraction des modèles
         msm_gt = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(count_gt).fetch_model()
         msm_pred = markov.msm.MaximumLikelihoodMSM(reversible=True).fit(count_pred).fetch_model()
+
+        # On crée des vecteurs de zéros de la taille totale (n_clusters)
+        pi_gt_full = np.zeros(n_clusters)
+        pi_gt_full[msm_gt.active_set] = msm_gt.stationary_distribution
+        
+        pi_pred_full = np.zeros(n_clusters)
+        pi_pred_full[msm_pred.active_set] = msm_pred.stationary_distribution
+
+        # On écrase l'ancienne valeur avec la vraie métrique
+        metrics["P2_Stationary_Dist_MAE"] = float(np.mean(np.abs(pi_gt_full - pi_pred_full)))
+        plot_stationary_distributions(pi_gt_full, pi_pred_full, "Phase 2 (MSM)", os.path.join(save_dir, "phase2_stationary_dist_msm.png"))
 
         # 3. Spectres cinétiques
         ts_gt = msm_gt.timescales()
@@ -563,8 +574,7 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
 
         try:
             import deeptime.plots as dplt
-
-            # Deeptime requiert d'estimer manuellement les modèles à plusieurs lagtimes pour le CK-test
+            
             models_ck = []
             lags_ck = [lag_time * i for i in range(1, 6)] # Test sur lagtime x1, x2, x3, x4, x5
             for lag in lags_ck:
@@ -574,12 +584,13 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
 
             # Appel du test sur le modèle principal en lui donnant les autres modèles
             ck_pred = msm_pred.ck_test(models_ck, n_metastable_sets=n_clusters)
-            fig = dplt.plot_cktest(ck_pred)
+            
+            fig = dplt.plot_ck_test(ck_pred) 
             plt.tight_layout()
             plt.savefig(os.path.join(save_dir, "phase2_CK_test_pred.png"), dpi=150)
             plt.close(fig)
         except Exception as e:
-            print(f"[Info] Test CK ignoré (non-convergé ou lagtime inadapté) : {e}")
+            print(f"[Info] Test CK ignoré (non-convergé ou erreur de plot) : {e}")
 
     except Exception as e:
         print(f"[Avertissement] Le modèle MSM SOTA n'a pas convergé : {e}")

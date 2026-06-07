@@ -64,7 +64,7 @@ def main():
     parser.add_argument("--test_data", type=str, default="../../../output/dataset/test.npy")
     parser.add_argument("--true_sim_path", type=str, default="../../../data/*backbone-dihedrals.npz")
     parser.add_argument("--n_clusters", type=int, default=6, help="Conformations K-Means")
-    parser.add_argument("--alpha", type=float, default=0.1)
+    parser.add_argument("--alpha", type=float, default=0.01)
     args = parser.parse_args()
 
     os.makedirs(args.log_dir, exist_ok=True)
@@ -142,7 +142,7 @@ def main():
     all_pred_trajs = []
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2", total=len(test_loader))):
+        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2", total=args.max_sampling_batches)):
             if i >= args.max_sampling_batches: 
                 break
 
