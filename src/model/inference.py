@@ -142,7 +142,7 @@ def main():
     all_pred_trajs = []
 
     with torch.no_grad():
-        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2", len=len(test_loader))):
+        for i, batch in enumerate(tqdm(test_loader, desc="Génération Auto-régressive Phase 2", total=len(test_loader))):
             if i >= args.max_sampling_batches: 
                 break
 
