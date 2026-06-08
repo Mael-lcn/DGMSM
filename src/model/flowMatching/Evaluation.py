@@ -555,7 +555,7 @@ def run_phase_2_eval(gt_trajs_list, pred_trajs_list, save_dir, fes_gt, xedges, y
         # On crée des vecteurs de zéros de la taille totale (n_clusters)
         pi_gt_full = np.zeros(n_clusters)
         pi_gt_full[msm_gt.active_set] = msm_gt.stationary_distribution
-        
+
         pi_pred_full = np.zeros(n_clusters)
         pi_pred_full[msm_pred.active_set] = msm_pred.stationary_distribution
 
