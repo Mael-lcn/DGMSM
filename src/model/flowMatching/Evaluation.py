@@ -304,11 +304,6 @@ class Phase1Evaluator:
         pred_np = full_pred_tensor.numpy()
         N_chunks, _, T_chunk = gt_np.shape
 
-        if T_gt is None or pi_gt is None:
-            n_clusters = global_kmeans.n_clusters
-            T_gt = np.eye(n_clusters)
-            pi_gt = np.ones(n_clusters) / n_clusters
-
         # 1. MAE Circulaire
         gt_short = full_gt_tensor[:, :, :min(self.max_mae_steps, T_chunk)]
         pred_short = full_pred_tensor[:, :, :min(self.max_mae_steps, T_chunk)]
@@ -333,30 +328,41 @@ class Phase1Evaluator:
             plot_trajectory(full_gt_tensor[0], full_pred_tensor[0], mae_deg, os.path.join(save_dir, f"traj_step_{step}.png"))
             plot_ramachandran(gt_phi, gt_psi, pred_phi, pred_psi, jsd_p1, w1_p1, os.path.join(save_dir, f"rama_step_{step}.png"))
 
-        # 3. Cinétique : Matrice et Distribution
-        pred_sincos = to_sincos_flat(pred_np)
-        n_clusters = global_kmeans.n_clusters
-        pred_dtrajs = global_kmeans.predict(pred_sincos).reshape(N_chunks, T_chunk)
-        
-        T_pred = build_trans_matrix(pred_dtrajs, n_clusters, lagtime=10)
-        pi_pred = compute_stationary_from_T(T_pred)
-        
-        trans_mae = float(np.mean(np.abs(T_gt - T_pred)))
-        statio_mae = float(np.mean(np.abs(pi_gt - pi_pred)))
-
-        if save_dir is not None and step is not None:
-            plot_transition_matrix_diff(T_gt, T_pred, "Phase 1", os.path.join(save_dir, f"phase1_trans_diff_step_{step}.png"))
-            plot_stationary_distributions(pi_gt, pi_pred, "Phase 1", os.path.join(save_dir, f"phase1_stationary_step_{step}.png"))
-
         metrics = {
             "P1_MAE_Circ_Deg_3steps": mae_deg,
             "P1_JSD_Distribution": jsd_p1,
             "P1_Wasserstein_Rad": w1_p1,
-            "P1_Transition_Matrix_MAE": trans_mae,
-            "P1_Stationary_Dist_MAE": statio_mae
         }
 
-        # 4. TICA Locale
+        # 3. Cinétique : Matrice et Distribution (SEULEMENT si K-Means est fourni !)
+        if global_kmeans is not None:
+            if T_gt is None or pi_gt is None:
+                n_clusters = global_kmeans.n_clusters
+                T_gt = np.eye(n_clusters)
+                pi_gt = np.ones(n_clusters) / n_clusters
+
+            pred_sincos = to_sincos_flat(pred_np)
+            n_clusters = global_kmeans.n_clusters
+            pred_dtrajs = global_kmeans.predict(pred_sincos).reshape(N_chunks, T_chunk)
+            
+            T_pred = build_trans_matrix(pred_dtrajs, n_clusters, lagtime=10)
+            pi_pred = compute_stationary_from_T(T_pred)
+            
+            trans_mae = float(np.mean(np.abs(T_gt - T_pred)))
+            statio_mae = float(np.mean(np.abs(pi_gt - pi_pred)))
+
+            if save_dir is not None and step is not None:
+                plot_transition_matrix_diff(T_gt, T_pred, "Phase 1", os.path.join(save_dir, f"phase1_trans_diff_step_{step}.png"))
+                plot_stationary_distributions(pi_gt, pi_pred, "Phase 1", os.path.join(save_dir, f"phase1_stationary_step_{step}.png"))
+
+            metrics["P1_Transition_Matrix_MAE"] = trans_mae
+            metrics["P1_Stationary_Dist_MAE"] = statio_mae
+        else:
+            # Sécurité pour l'entraînement : on met 0 par défaut
+            metrics["P1_Transition_Matrix_MAE"] = 0.0
+            metrics["P1_Stationary_Dist_MAE"] = 0.0
+
+        # 4. TICA Locale (SEULEMENT si TICA est fourni !)
         if tica_model is not None:
             gt_sincos = to_sincos_flat(gt_np)
             gt_tica = tica_model.transform(gt_sincos)
@@ -370,8 +376,13 @@ class Phase1Evaluator:
 
             metrics["P1_TICA_JSD"] = jsd_tica
             metrics["P1_TICA_Pearson"] = float(pearson_r)
+        else:
+            # Sécurité pour l'entraînement
+            metrics["P1_TICA_JSD"] = 0.0
+            metrics["P1_TICA_Pearson"] = 0.0
 
         return metrics
+
 
 
 # =====================================================================

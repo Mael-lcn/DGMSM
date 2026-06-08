@@ -32,11 +32,11 @@ class AlanineDipeptideChunkDataset(Dataset):
         en extrayant un sous-segment et en l'étirant à la taille originale.
         """
         length = chunk.shape[0]
-        
+
         # 1. On choisit une magnitude de déformation (ex: entre 70% et 100% de la taille d'origine)
         factor = 1.0 - (torch.rand(1).item() * self.cfg["time_warp_mag"]) # factor <= 1.0
         sub_length = max(2, int(length * factor))
-        
+
         # 2. On crop un sous-segment aléatoire dans la trajectoire
         start_idx = torch.randint(0, length - sub_length + 1, (1,)).item()
         sub_chunk = chunk[start_idx : start_idx + sub_length]
@@ -44,7 +44,7 @@ class AlanineDipeptideChunkDataset(Dataset):
         # 3. On interpole ce sous-segment pour qu'il remplisse la taille attendue par le modèle (length)
         chunk_t = sub_chunk.t().unsqueeze(0) # Forme (Batch=1, Channels, Length)
         warped = F.interpolate(chunk_t, size=length, mode='linear', align_corners=True)
-        
+
         # 4. On redonne au tenseur sa forme d'origine (Length, Channels)
         return warped.squeeze(0).t()
 
@@ -54,7 +54,7 @@ class AlanineDipeptideChunkDataset(Dataset):
         Cela simule un jittering périodique sans les problèmes de shape de VonMises.
         """
         # On définit l'intensité du bruit (plus il est haut, plus le bruit est faible)
-        std = 1.0 / self.cfg.get("jitter_concentration", 50.0)
+        std = 1.0 / self.cfg.get("jitter_concentration", 100.0)
 
         noise = torch.randn_like(chunk) * std
 
@@ -74,11 +74,12 @@ class AlanineDipeptideChunkDataset(Dataset):
         chunk = torch.from_numpy(self.data[index].copy()).float()
 
         if self.training:
-            if torch.rand(1) < self.cfg["time_warp_prob"]:
-                chunk = self.apply_time_warp(chunk)
-
             if torch.rand(1) < self.cfg["jitter_prob"]:
                 chunk = self.apply_periodic_jitter(chunk)
+
+            """
+            if torch.rand(1) < self.cfg["time_warp_prob"]:
+                chunk = self.apply_time_warp(chunk)
 
             if torch.rand(1) < self.cfg["mask_prob"]:
                 # On ne masque que l'input (contexte) pour le Flow Matching
@@ -87,7 +88,7 @@ class AlanineDipeptideChunkDataset(Dataset):
  
             if torch.rand(1) < self.cfg["reflect_prob"]:
                 chunk = self.apply_reflection(chunk)
-
+            """
         item_input = chunk[:self.context_length]
         item_ground_truth = chunk[self.context_length:]
 
